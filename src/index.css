@@ -1,0 +1,10 @@
+/* src/index.css */
+:root {
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, 'Noto Sans KR', Arial, sans-serif; color: #111; }
+a { color: inherit; text-decoration: none; }
+button { font-family: inherit; }
