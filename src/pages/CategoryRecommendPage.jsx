@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { supabase } from '../utils/supabaseClient';
-import { recommendForPairs } from '../utils/ai';
+// import { recommendForPairs } from '../utils/ai'; // ❌ 사용 안 함 (메모리 추천으로 교체)
 import DashboardButton from '../components/DashboardButton';
 import '../styles/ui.css';
 
@@ -11,7 +11,7 @@ const UUID_RE =
 
 // --- 공통 유틸 ---------------------------------------------------------------
 
-// 카테고리 ID로 경로 라벨 구성 (상위→하위)
+// 카테고리 ID로 경로 라벨 구성 (상위→하위, 화면 표시는 →)
 function pathLabelLocal(categoryId, fallback, metaObj) {
   if (!categoryId) return fallback || '(이름 없음)';
   const names = [];
@@ -21,6 +21,18 @@ function pathLabelLocal(categoryId, fallback, metaObj) {
     cur = metaObj[cur].parent_id;
   }
   return names.join('→') || fallback || '(이름 없음)';
+}
+
+// 카테고리 ID로 'DB 경로 문자열( > 구분자 )' 생성 (학습 저장용)
+function pathStringForDB(categoryId, metaObj) {
+  if (!categoryId) return null;
+  const names = [];
+  let cur = categoryId;
+  while (cur && metaObj[cur]) {
+    names.unshift(metaObj[cur].name);
+    cur = metaObj[cur].parent_id;
+  }
+  return names.length ? names.join(' > ') : null;
 }
 
 export default function CategoryRecommendPage() {
@@ -38,6 +50,7 @@ export default function CategoryRecommendPage() {
   );
 
   const [pairs, setPairs] = useState([]);
+  // recs: { [pairId]: Array<{ category_id, reason?, score?, support_count?, example_sim? }> }
   const [recs, setRecs] = useState({});
   const [selected, setSelected] = useState({});
   const [catMeta, setCatMeta] = useState({});
@@ -71,46 +84,54 @@ export default function CategoryRecommendPage() {
         setCatMeta(allMeta);
         setLeafIds(allLeaves);
 
-        // 3) AI 추천 호출 (유틸 사용)
-        const efData = await recommendForPairs(
-          (pairRows ?? []).map((p) => ({
-            pair_id: p.id,
-            en: p.en_sentence,
-            ko: p.ko_sentence,
-          }))
-        );
-        const efResults = efData?.results ?? [];
-
-        // 4) 추천 결과(path)를 category_id로 변환 + leaf만 유지
+        // 3) 메모리 기반 추천 호출 (문장별 RPC)
         const recMap = {};
         const rawUnmatched = {};
         const rawNonLeaf = {};
-        for (const r of efResults) {
-          const pid = r?.pair_id;
-          const items = r?.recs ?? [];
-          if (!pid) continue;
-          const arr = [];
-          for (const it of items) {
-            const path = (it?.path ?? '').trim();
-            if (!path) continue;
 
-            const cid = resolvePath(path);
-            if (!cid) {
-              (rawUnmatched[pid] ||= []).push(path);
-              continue;
+        // 문장별 병렬 호출
+        await Promise.all(
+          (pairRows ?? []).map(async (p) => {
+            const { data, error } = await supabase.rpc('memory_recommend_for_text', {
+              p_en: p.en_sentence,
+              p_ko: p.ko_sentence ?? null,
+              p_top_n: 6,
+            });
+            if (error) {
+              // RPC가 없거나 초기엔 데이터가 없어도 에러 없이 빈 추천일 수 있음
+              console.warn('[memory_recommend_for_text] error', error);
+              return;
             }
-            if (!allLeaves.has(cid)) {
-              (rawNonLeaf[pid] ||= []).push(pathLabelLocal(cid, path, allMeta));
-              continue;
-            }
-            if (arr.findIndex((x) => x.category_id === cid) === -1) {
-              arr.push({ category_id: cid, score: null, rank: null });
-            }
-          }
-          if (arr.length > 0) recMap[pid] = arr;
-        }
+            const items = Array.isArray(data) ? data : [];
+            const arr = [];
+            for (const it of items) {
+              const path = (it?.path ?? '').trim(); // "A > B > C"
+              if (!path) continue;
 
-        // 5) 기존 선택값 불러오기
+              const cid = resolvePath(path); // 문자열 경로 → category_id
+              if (!cid) {
+                (rawUnmatched[p.id] ||= []).push(path);
+                continue;
+              }
+              if (!allLeaves.has(cid)) {
+                (rawNonLeaf[p.id] ||= []).push(pathLabelLocal(cid, path, allMeta));
+                continue;
+              }
+              if (arr.findIndex((x) => x.category_id === cid) === -1) {
+                arr.push({
+                  category_id: cid,
+                  reason: it?.reason ?? '',
+                  score: it?.score ?? null,
+                  support_count: it?.support_count ?? null,
+                  example_sim: it?.example_sim ?? null,
+                });
+              }
+            }
+            if (arr.length > 0) recMap[p.id] = arr;
+          })
+        );
+
+        // 4) 기존 선택값 불러오기
         const pairIds = (pairRows ?? []).map((p) => p.id).filter(Boolean);
         let selRows = [];
         if (pairIds.length > 0) {
@@ -271,8 +292,9 @@ export default function CategoryRecommendPage() {
 
   const saveAll = async () => {
     try {
+      // 1) 분류 저장
       const selections = Object.entries(selected).map(([pairId, set]) => ({
-        pair_id: pairId,
+        pair_id: Number(pairId),
         category_ids: Array.from(set || []),
       }));
       const { error: e1 } = await supabase.rpc('material_save_pair_categories', {
@@ -280,6 +302,28 @@ export default function CategoryRecommendPage() {
         p_selections: selections,
       });
       if (e1) throw e1;
+
+      // 2) 학습 데이터 누적 (선택된 분류를 텍스트 경로로 저장)
+      await Promise.all(
+        (pairs ?? []).map(async (p) => {
+          const chosenIds = Array.from(selected[p.id] ?? []);
+          if (chosenIds.length === 0) return;
+          const paths = chosenIds
+            .map((cid) => pathStringForDB(cid, catMeta))
+            .filter(Boolean);
+          if (paths.length === 0) return;
+
+          const { error } = await supabase.rpc('save_pair_feedback', {
+            p_material_id: materialId ?? null,
+            p_pair_id: p.id,
+            p_en: p.en_sentence,
+            p_ko: p.ko_sentence ?? null,
+            p_paths: paths, // ["품사 > 동사 > 구동사", ...] (leaf만)
+          });
+          if (error) console.warn('[save_pair_feedback]', p.id, error.message);
+        })
+      );
+
       alert('저장되었습니다.');
     } catch (err) {
       alert(`저장 오류: ${err.message}`);
@@ -293,8 +337,8 @@ export default function CategoryRecommendPage() {
           <div>
             <div className="ui-title">문장별 자동 분류 추천</div>
             <div className="ui-sub">
-              추천은 <b>최하위 분류만</b> 표시하며, <b>영문(en_sentence) 기준</b>으로 계산됩니다.
-              라벨은 경로로 보여줘요 (예: 품사→명사→보통명사).
+              추천은 <b>최하위 분류만</b> 표시하며, <b>영문(en_sentence) 기준</b> +{' '}
+              <b>누적 학습 데이터</b>로 계산됩니다. 각 추천에는 <b>한국어 이유</b>가 함께 제공됩니다.
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -360,12 +404,11 @@ export default function CategoryRecommendPage() {
 
                     <div style={{ marginTop: 12 }}>
                       <span className="ui-sub">
-                        추천 분류 <small>(최하위만, EN 기준)</small>
+                        추천 분류 <small>(최하위만, 메모리 기반 + EN 기준)</small>
                       </span>
                       <div
                         style={{
-                          display: 'flex',
-                          flexWrap: 'wrap',
+                          display: 'grid',
                           gap: 8,
                           marginTop: 6,
                         }}
@@ -377,13 +420,20 @@ export default function CategoryRecommendPage() {
                           const cid = r.category_id;
                           const on = checked.has(cid);
                           return (
-                            <button
-                              key={cid}
-                              className={`ui-btn sm ${on ? 'primary' : ''}`}
-                              onClick={() => toggle(p.id, cid)}
-                            >
-                              {pathLabel(cid)}
-                            </button>
+                            <div key={cid} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              <button
+                                className={`ui-btn sm ${on ? 'primary' : ''}`}
+                                title={r.reason || ''}
+                                onClick={() => toggle(p.id, cid)}
+                              >
+                                {pathLabel(cid)}
+                              </button>
+                              {r.reason && (
+                                <div className="ui-sub" style={{ fontSize: 12, lineHeight: 1.4 }}>
+                                  {r.reason}
+                                </div>
+                              )}
+                            </div>
                           );
                         })}
                       </div>

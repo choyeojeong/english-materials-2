@@ -85,17 +85,20 @@ const OPENAI_MODEL = "gpt-4o-mini";
 /** 🧠 시스템 프롬프트(강화) */
 const SYS_PROMPT = `
 너는 한국 중·고등 영어 교육과정 분류 보조 교사다.
-반드시 아래 '허용 경로(화이트리스트)'에 포함된 경로만 추천한다. 존재하지 않는 경로는 절대 만들지 말 것.
-각 입력(영문/번역)을 보고 교육적으로 핵심적인 문법·구문 포인트를 **최소 3개, 최대 6개** 선택한다.
-각 항목은 {"path":"허용경로 그대로","reason":"간단 근거(한국어)"} 형식이며, **반드시 고정된 JSON 스키마**로만 출력한다.
 
-중요 규칙:
-- 'path'는 아래 목록의 문자열을 **한 글자도 다르지 않게 그대로** 사용한다(공백/괄호/하이픈 포함).
-- 목록에 없는 표현(유사어/축약/영문 표기) 금지.
-- 동일 의미라도 문자열이 다르면 잘못된 것으로 간주한다.
-- 가능한 한 문장 내 핵심 포인트끼리 **중복되지 않도록** 다양하게 선택한다.
+목표:
+- 입력된 EN/KO 문장을 보고 교육적으로 핵심적인 문법·구문 포인트를 **최소 3개, 최대 6개** 추천한다.
+- 단, 확신이 부족하면 **빈 배열([])** 을 반환한다.
 
-유효한 경로 목록(정확히 동일 문자열만 유효):
+절대 규칙:
+- 추천 경로는 아래 '허용 경로(화이트리스트)' 내의 **리프 경로만** 사용한다.
+- 경로 문자열은 **공백, 괄호, 기호까지 한 글자도 다르게 쓰지 말 것**.
+- 경로 구분자는 항상 **" > "** (양쪽 한 칸 공백 포함)만 사용.
+- **동일/유사 의미 중복을 피하고 다양하게** 제안한다.
+- EN 문장 의미를 우선으로 판단하고, KO는 보조적으로만 사용.
+- 출력은 오직 JSON(고정 스키마)로만.
+
+허용 경로 목록:
 ${TAXONOMY.map((p) => `- ${p}`).join("\n")}
 `.trim();
 
@@ -126,7 +129,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 function isRec(v: unknown): v is Rec {
-  return isRecord(v) && typeof v.path === "string" && (v.reason === undefined || typeof v.reason === "string");
+  return isRecord(v) && typeof (v as any).path === "string" && (((v as any).reason === undefined) || typeof (v as any).reason === "string");
 }
 function isRecArray(v: unknown): v is Rec[] {
   return Array.isArray(v) && v.every(isRec);
@@ -158,21 +161,25 @@ function filterToAllowed(items: Rec[], _min = MIN_REC, max = MAX_REC): Rec[] {
 /** 👤 유저 메시지 구성 */
 function buildUserContent(en: string, ko?: string) {
   const lines = [
+    `EN 우선으로 판단하고, KO는 보조적으로만 사용.`,
+    `권장 개수: ${MIN_REC}~${MAX_REC}개. 확신 없으면 빈 배열([]) 반환.`,
+    `경로 구분자는 " > "를 사용하고, 화이트리스트에 **정확히 일치**해야 함.`,
+    `중복/유사 포인트는 피하고 **다양성**을 확보할 것.`,
+  ];
+  const rows = [
     `영문: ${en}`,
     `한글: ${ko ? ko : "(없음)"}`,
-    `요구사항:`,
-    `- 추천 개수는 ${MIN_REC}~${MAX_REC}개.`,
-    `- 경로는 반드시 '허용 경로' 중에서만 선택.`,
-    `- 동일/유사 포인트 중복 추천 금지.`,
-  ];
+  ].join("\n");
+
   const shot = FEW_SHOT.map((s) =>
     [
       `예시 문장: ${s.en}`,
       `예시 번역: ${s.ko}`,
-      `예시 정답: ${JSON.stringify({ items: s.paths.map((p) => ({ path: p, reason: "핵심 포인트" })) })}`,
+      `예시 정답(JSON): ${JSON.stringify({ items: s.paths.map((p) => ({ path: p, reason: "핵심 포인트" })) })}`,
     ].join("\n"),
   ).join("\n\n");
-  return lines.join("\n") + "\n\n" + shot;
+
+  return `${lines.join("\n")}\n\n${rows}\n\n${shot}`;
 }
 
 /** 🧩 JSON 파서(코드블록/문장 중 포함 케이스까지 긁어오기) */
@@ -181,7 +188,7 @@ function safeParseArrayOrItems(jsonText: string): Rec[] {
     const obj: unknown = JSON.parse(jsonText);
     if (isRecArray(obj)) return obj;
     if (hasItemsArray(obj)) return (obj as { items: Rec[] }).items;
-  } catch {/* ignore */}
+  } catch { /* ignore */ }
   const m =
     jsonText.match(/```json\s*([\s\S]*?)\s*```/) ??
     jsonText.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
@@ -190,7 +197,7 @@ function safeParseArrayOrItems(jsonText: string): Rec[] {
       const obj2: unknown = JSON.parse(m[1]);
       if (isRecArray(obj2)) return obj2;
       if (hasItemsArray(obj2)) return (obj2 as { items: Rec[] }).items;
-    } catch {/* ignore */}
+    } catch { /* ignore */ }
   }
   return [];
 }
@@ -224,13 +231,14 @@ async function callOpenAI(payload: Record<string, unknown>, timeoutMs = OPENAI_T
   }
 }
 
-/** 🧪 OpenAI 질의: 1회 시도(스키마) → 실패 시 휴리스틱 */
+/** 🧪 OpenAI 질의: 성공하면 결과(빈 배열 포함)를 그대로 사용. 실패 시에만 휴리스틱 */
 async function askOpenAI(en: string, ko?: string): Promise<Rec[]> {
   try {
     const data = await callOpenAI({
       model: OPENAI_MODEL,
-      temperature: 0.2,
-      max_tokens: 300, // 빠른 응답 유도
+      // 🔼 다양도 향상
+      temperature: 0.5,
+      max_tokens: 500,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -240,12 +248,13 @@ async function askOpenAI(en: string, ko?: string): Promise<Rec[]> {
             properties: {
               items: {
                 type: "array",
-                minItems: MIN_REC,
+                // ✅ 빈 배열 허용: minItems 제거
                 maxItems: MAX_REC,
                 items: {
                   type: "object",
                   required: ["path", "reason"],
                   properties: {
+                    // ✅ 화이트리스트 강제
                     path: { type: "string", enum: TAXONOMY },
                     reason: { type: "string", minLength: 2, maxLength: 160 },
                   },
@@ -263,29 +272,29 @@ async function askOpenAI(en: string, ko?: string): Promise<Rec[]> {
         { role: "system", content: SYS_PROMPT },
         { role: "user", content: buildUserContent(en, ko) },
       ],
-    }, 8_000); // 시도당 8초
+    }, OPENAI_TIMEOUT_MS);
+
     const cc = data as ChatCompletion;
     const text = cc.choices?.[0]?.message?.content ?? "";
     const arr = safeParseArrayOrItems(text);
-    const filtered = filterToAllowed(arr);
-    if (filtered.length >= MIN_REC) return filtered;
+    // ✅ 필터링 후 길이에 상관없이 반환(빈 배열 가능)
+    return filterToAllowed(arr);
+
   } catch (e) {
     console.error("[recommend_ai] OpenAI call failed:", e instanceof Error ? e.message : String(e));
+    // 🔦 호출 자체가 실패했을 때만 휴리스틱 폴백 (화이트리스트 내에서만)
+    const heuristics: string[] = [];
+    const s = (en || "").toLowerCase();
+    if (s.includes("i wish")) heuristics.push("특수 구문 > 가정법 구문 > I wish 가정법");
+    if (/\b(if|unless|provided|as long as)\b/.test(s)) heuristics.push("절(Clause) > 부사절 > 조건의 부사절");
+    if (/\bthat\b/.test(s)) heuristics.push("절(Clause) > 명사절 > that절");
+    if (/\bto\s+\w+/.test(s)) heuristics.push("구(Phrase) > to부정사구 > 부사적 용법");
+    if (/\b(who|which|that)\b/.test(s)) heuristics.push("절(Clause) > 형용사절 > 관계대명사절");
+    if (/\b(more|most|less|least|than|as\b.*\bas)\b/.test(s)) heuristics.push("특수 구문 > 비교급 구문");
+
+    const uniq = Array.from(new Set(heuristics)).filter((p) => TAXONOMY.includes(p)).slice(0, MAX_REC);
+    return uniq.map((p) => ({ path: p, reason: "전형적 패턴(휴리스틱)" }));
   }
-
-  // 🔦 휴리스틱 폴백(화이트리스트만)
-  const heuristics: string[] = [];
-  const s = en.toLowerCase();
-  if (s.includes("i wish")) heuristics.push("특수 구문 > 가정법 구문 > I wish 가정법");
-  if (/\b(if|unless|provided|as long as)\b/.test(s)) heuristics.push("절(Clause) > 부사절 > 조건의 부사절");
-  if (/\bthat\b/.test(s)) heuristics.push("절(Clause) > 명사절 > that절");
-  if (/\bto\s+\w+/.test(s)) heuristics.push("구(Phrase) > to부정사구 > 부사적 용법");
-  if (/\b(who|which|that)\b/.test(s)) heuristics.push("절(Clause) > 형용사절 > 관계대명사절");
-  if (/\b(more|most|less|least|than|as\b.*\bas)\b/.test(s)) heuristics.push("특수 구문 > 비교급 구문");
-
-  const uniq = Array.from(new Set(heuristics)).filter((p) => TAXONOMY.includes(p)).slice(0, MAX_REC);
-  if (uniq.length >= MIN_REC) return uniq.map((p) => ({ path: p, reason: "전형적 패턴(휴리스틱)" }));
-  return uniq.map((p) => ({ path: p, reason: "전형적 패턴(휴리스틱)" }));
 }
 
 /** ▶️ HTTP 핸들러 */

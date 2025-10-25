@@ -226,6 +226,42 @@ export default function SplitReviewPage() {
     }
   };
 
+  // 🔥 단축키: Enter=나눔, Ctrl+Backspace=위와 합침(커서 맨 앞), Ctrl+Delete=다음과 합침(커서 맨 끝)
+  const handleKeyDown = (side, i) => (e) => {
+    const ref = side === 'en' ? enRefs.current[i] : koRefs.current[i];
+    if (!ref) return;
+
+    const start = ref.selectionStart ?? 0;
+    const end = ref.selectionEnd ?? 0;
+    setCur({ side, index: i, start, end });
+
+    // Enter → 나눔
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      splitActive();
+      return;
+    }
+
+    // Ctrl+Backspace: 맨 앞이면 위와 합침
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Backspace') {
+      if (start === 0 && end === 0) {
+        e.preventDefault();
+        mergeWithPrev();
+        return;
+      }
+    }
+
+    // Ctrl+Delete: 맨 끝이면 다음과 합침
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Delete') {
+      const val = (side === 'en' ? enRows[i] : koRows[i]) ?? '';
+      if (start === val.length && end === val.length) {
+        e.preventDefault();
+        mergeWithNext();
+        return;
+      }
+    }
+  };
+
   return (
     <div className="ui-page">
       <div className="ui-wrap">
@@ -300,6 +336,7 @@ export default function SplitReviewPage() {
                           onFocus={onFocus('en', i)}
                           onClick={onCaret('en', i)}
                           onKeyUp={onCaret('en', i)}
+                          onKeyDown={handleKeyDown('en', i)}   // 단축키
                           onChange={(e) => {
                             const next = [...enRows];
                             next[i] = e.target.value;
@@ -348,6 +385,7 @@ export default function SplitReviewPage() {
                           onFocus={onFocus('ko', i)}
                           onClick={onCaret('ko', i)}
                           onKeyUp={onCaret('ko', i)}
+                          onKeyDown={handleKeyDown('ko', i)}   // 단축키
                           onChange={(e) => {
                             const next = [...koRows];
                             next[i] = e.target.value;
@@ -407,7 +445,18 @@ const S = {
   tdTool: { verticalAlign: 'top', paddingTop: 6, width: 120 },
   cell: { position: 'relative', background: '#fff', border: '1px solid #e6e9f1', borderRadius: 10, padding: 10, boxShadow: '0 1px 2px rgba(0,0,0,0.04)' },
   tools: { position: 'absolute', top: -11, left: 10, display: 'flex', gap: 6 },
-  ta: { width: '100%', minHeight: 110, resize: 'vertical', border: '1px solid #e5e7eb', borderRadius: 8, padding: '10px 12px', outline: 'none', fontSize: 15, lineHeight: 1.55, background:'#fff' },
+  ta: {
+    width: '100%',
+    minHeight: 110,
+    resize: 'vertical',
+    border: '1px solid #e5e7eb',   // ✅ 따옴표 수정
+    borderRadius: 8,
+    padding: '10px 12px',
+    outline: 'none',
+    fontSize: 15,
+    lineHeight: 1.55,
+    background: '#fff',
+  },
   vtools: { display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'center' },
   hintEmpty: { position: 'absolute', right: 10, bottom: 10, fontSize: 12, color: '#999' },
 };
