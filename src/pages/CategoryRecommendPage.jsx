@@ -2,44 +2,25 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { supabase } from '../utils/supabaseClient';
+import { recommendForPairs } from '../utils/ai';
 import DashboardButton from '../components/DashboardButton';
 import '../styles/ui.css';
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// ✅ 에지 함수 호출 헬퍼: DEV=로컬 우선, 실패 시 원격
-async function invokeRecommendAI(body) {
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-  const LOCAL = 'http://127.0.0.1:54321/functions/v1';
-  const REMOTE = `${supabaseUrl}/functions/v1`;
+// --- 공통 유틸 ---------------------------------------------------------------
 
-  const targets = import.meta.env.DEV ? [LOCAL, REMOTE] : [REMOTE];
-  let lastErr;
-
-  for (const base of targets) {
-    try {
-      const res = await fetch(`${base}/recommend_ai`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // 원격 호출 시 필요한 공개키(클라이언트에서 노출되어도 되는 anon key)
-          Authorization: `Bearer ${supabaseAnonKey}`,
-        },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const t = await res.text().catch(() => '');
-        throw new Error(`HTTP ${res.status} ${t}`);
-      }
-      return await res.json();
-    } catch (e) {
-      lastErr = e;
-      // 로컬이 안 뜬 경우 다음 후보(원격)로 폴백
-    }
+// 카테고리 ID로 경로 라벨 구성 (상위→하위)
+function pathLabelLocal(categoryId, fallback, metaObj) {
+  if (!categoryId) return fallback || '(이름 없음)';
+  const names = [];
+  let cur = categoryId;
+  while (cur && metaObj[cur]) {
+    names.unshift(metaObj[cur].name);
+    cur = metaObj[cur].parent_id;
   }
-  throw lastErr || new Error('Failed to call recommend_ai');
+  return names.join('→') || fallback || '(이름 없음)';
 }
 
 export default function CategoryRecommendPage() {
@@ -86,20 +67,18 @@ export default function CategoryRecommendPage() {
         // 2) 카테고리 전체 로드(경로(path) → id 매핑 강화)
         const { meta: allMeta, leaves: allLeaves, resolvePath } =
           await loadAllCategories();
+        if (!alive) return;
         setCatMeta(allMeta);
         setLeafIds(allLeaves);
 
-        // 3) AI 추천 호출 (직접 fetch 사용)
-        const invokeBody = {
-          items: (pairRows ?? []).map((p) => ({
+        // 3) AI 추천 호출 (유틸 사용)
+        const efData = await recommendForPairs(
+          (pairRows ?? []).map((p) => ({
             pair_id: p.id,
             en: p.en_sentence,
             ko: p.ko_sentence,
-          })),
-        };
-
-        const efData = await invokeRecommendAI(invokeBody);
-        console.log('[recommend_ai] response', efData);
+          }))
+        );
         const efResults = efData?.results ?? [];
 
         // 4) 추천 결과(path)를 category_id로 변환 + leaf만 유지
@@ -243,17 +222,6 @@ export default function CategoryRecommendPage() {
     return { meta, leaves, resolvePath };
   }
 
-  const pathLabelLocal = (categoryId, fallback, metaObj) => {
-    if (!categoryId) return fallback || '(이름 없음)';
-    const names = [];
-    let cur = categoryId;
-    while (cur && metaObj[cur]) {
-      names.unshift(metaObj[cur].name);
-      cur = metaObj[cur].parent_id;
-    }
-    return names.join('→') || fallback || '(이름 없음)';
-  };
-
   const pathLabel = (categoryId, fallback) => pathLabelLocal(categoryId, fallback, catMeta);
 
   const toggle = (pairId, categoryId) => {
@@ -325,8 +293,7 @@ export default function CategoryRecommendPage() {
           <div>
             <div className="ui-title">문장별 자동 분류 추천</div>
             <div className="ui-sub">
-              추천은 <b>최하위 분류만</b> 표시하며,{' '}
-              <b>영문(en_sentence) 기준</b>으로 계산됩니다.
+              추천은 <b>최하위 분류만</b> 표시하며, <b>영문(en_sentence) 기준</b>으로 계산됩니다.
               라벨은 경로로 보여줘요 (예: 품사→명사→보통명사).
             </div>
           </div>
