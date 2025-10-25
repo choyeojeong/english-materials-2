@@ -1,27 +1,29 @@
 // src/utils/auth.js
 
-const KEY = 'em2_authed';
+const KEY = 'em2_auth';
+
+export function loginSession({ name }) {
+  const payload = { name: String(name || '').trim(), at: Date.now() };
+  localStorage.setItem(KEY, JSON.stringify(payload));
+  return payload;
+}
+
+export function logoutSession() {
+  localStorage.removeItem(KEY);
+}
+
+export function getSession() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || !obj.name) return null;
+    return obj;
+  } catch {
+    return null;
+  }
+}
 
 export function isAuthed() {
-  try {
-    return localStorage.getItem(KEY) === 'yes';
-  } catch {
-    return false;
-  }
+  return !!getSession();
 }
-
-export function tryLogin(id, pw) {
-  // 요구사항: 아이디 rabbit / 비밀번호 habit
-  const ok = (id || '').trim() === 'rabbit' && (pw || '').trim() === 'habit';
-  if (ok) {
-    localStorage.setItem(KEY, 'yes');
-  }
-  return ok;
-}
-
-export function logout() {
-  try {
-    localStorage.removeItem(KEY);
-  } catch {}
-}
-export const login = tryLogin;
