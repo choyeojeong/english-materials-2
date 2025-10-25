@@ -1,61 +1,55 @@
-// src/pages/LoginPage.jsx
-import { useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { login, isAuthed } from '../utils/auth';
-
-const styles = {
-  page: { minHeight: '100dvh', background: '#f5f7fb', display: 'grid', placeItems: 'center', padding: 16 },
-  card: { width: '100%', maxWidth: 420, background: '#fff', border: '1px solid #e6e9ef', borderRadius: 12, boxShadow: '0 6px 20px rgba(20,30,50,0.06)', padding: 24 },
-  title: { margin: 0, fontSize: 22, fontWeight: 800, color: '#2360ff' },
-  label: { display: 'block', fontSize: 13, color: '#374151', marginTop: 16, marginBottom: 6 },
-  input: { width: '100%', padding: '12px 14px', border: '1px solid #d5d9e2', borderRadius: 10, outline: 'none', fontSize: 14 },
-  btn: { marginTop: 20, width: '100%', padding: '12px 16px', background: '#2360ff', color: '#fff', border: 'none', borderRadius: 10, fontWeight: 700, cursor: 'pointer' },
-  err: { marginTop: 12, color: '#d12c2c', fontSize: 13 },
-};
+import { useEffect, useState } from 'react';
+import { Link, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { isAuthed, login, logout } from '../utils/auth';
 
 export default function LoginPage() {
   const nav = useNavigate();
-  const location = useLocation();
-  const from = location.state?.from?.pathname || '/';
-
+  const loc = useLocation();
   const [id, setId] = useState('');
   const [pw, setPw] = useState('');
   const [err, setErr] = useState('');
 
-  if (isAuthed()) nav('/', { replace: true });
+  // ❌ 렌더 중 navigate 금지
+  // ✅ 이미 로그인 상태면 렌더 반환을 <Navigate>로 처리
+  if (isAuthed()) {
+    const to = (loc.state && loc.state.from) ? loc.state.from.pathname : '/';
+    return <Navigate to={to} replace />;
+  }
 
-  const onSubmit = (e) => {
+  const onSubmit = async (e) => {
     e.preventDefault();
     setErr('');
-    const ok = login(id.trim(), pw);
-    if (ok) nav(from, { replace: true });
-    else setErr('아이디 또는 비밀번호가 올바르지 않습니다.');
+    try {
+      // english-materials-2: 간단 로그인 (rabbit / habit)
+      if (id.trim() === 'rabbit' && pw.trim() === 'habit') {
+        login({ name: 'rabbit' }); // localStorage 등에 저장
+        nav('/', { replace: true }); // ✅ 이벤트 핸들러 안에서 navigate
+      } else {
+        setErr('아이디 또는 비밀번호가 올바르지 않습니다.');
+      }
+    } catch (e2) {
+      setErr(e2.message || '로그인 오류');
+    }
   };
 
   return (
-    <div style={styles.page}>
-      <form onSubmit={onSubmit} style={styles.card}>
-        <h1 style={styles.title}>english-materials-2</h1>
-
-        <label style={styles.label}>아이디</label>
-        <input
-          style={styles.input}
-          value={id}
-          onChange={(e) => setId(e.target.value)}
-          autoFocus
-        />
-
-        <label style={styles.label}>비밀번호</label>
-        <input
-          style={styles.input}
-          type="password"
-          value={pw}
-          onChange={(e) => setPw(e.target.value)}
-        />
-
-        <button type="submit" style={styles.btn}>로그인</button>
-        {err && <div style={styles.err}>{err}</div>}
-      </form>
+    <div className="ui-page">
+      <div className="ui-wrap" style={{maxWidth:420}}>
+        <div className="ui-card">
+          <h2 className="ui-title">로그인</h2>
+          <form onSubmit={onSubmit} style={{display:'grid', gap:10}}>
+            <input className="ui-input" placeholder="아이디 (rabbit)"
+                   value={id} onChange={e=>setId(e.target.value)} />
+            <input className="ui-input" placeholder="비밀번호 (habit)"
+                   type="password" value={pw} onChange={e=>setPw(e.target.value)} />
+            {err && <div className="ui-warn">{err}</div>}
+            <button className="ui-btn primary" type="submit">로그인</button>
+          </form>
+          <div style={{marginTop:10, fontSize:12, color:'#6b7280'}}>
+            데모 계정: rabbit / habit
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

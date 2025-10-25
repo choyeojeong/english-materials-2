@@ -8,6 +8,40 @@ import '../styles/ui.css';
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// ✅ 에지 함수 호출 헬퍼: DEV=로컬 우선, 실패 시 원격
+async function invokeRecommendAI(body) {
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  const LOCAL = 'http://127.0.0.1:54321/functions/v1';
+  const REMOTE = `${supabaseUrl}/functions/v1`;
+
+  const targets = import.meta.env.DEV ? [LOCAL, REMOTE] : [REMOTE];
+  let lastErr;
+
+  for (const base of targets) {
+    try {
+      const res = await fetch(`${base}/recommend_ai`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // 원격 호출 시 필요한 공개키(클라이언트에서 노출되어도 되는 anon key)
+          Authorization: `Bearer ${supabaseAnonKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${t}`);
+      }
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+      // 로컬이 안 뜬 경우 다음 후보(원격)로 폴백
+    }
+  }
+  throw lastErr || new Error('Failed to call recommend_ai');
+}
+
 export default function CategoryRecommendPage() {
   const params = useParams();
   const [sp] = useSearchParams();
@@ -30,6 +64,8 @@ export default function CategoryRecommendPage() {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState({});
   const [results, setResults] = useState({});
+  const [unmatched, setUnmatched] = useState({});
+  const [nonLeaf, setNonLeaf] = useState({});
 
   useEffect(() => {
     let alive = true;
@@ -39,6 +75,7 @@ export default function CategoryRecommendPage() {
           throw new Error(`잘못된 materialId: ${materialId || '(없음)'}`);
         setLoading(true);
 
+        // 1) 문장/순서/한영
         const { data: pairRows, error: e1 } = await supabase
           .from('material_pairs')
           .select('id, en_sentence, ko_sentence, order_index')
@@ -46,12 +83,55 @@ export default function CategoryRecommendPage() {
           .order('order_index', { ascending: true });
         if (e1) throw e1;
 
-        const { data: recRows, error: e2 } = await supabase.rpc(
-          'category_recommend_for_material',
-          { p_material_id: materialId }
-        );
-        if (e2) throw e2;
+        // 2) 카테고리 전체 로드(경로(path) → id 매핑 강화)
+        const { meta: allMeta, leaves: allLeaves, resolvePath } =
+          await loadAllCategories();
+        setCatMeta(allMeta);
+        setLeafIds(allLeaves);
 
+        // 3) AI 추천 호출 (직접 fetch 사용)
+        const invokeBody = {
+          items: (pairRows ?? []).map((p) => ({
+            pair_id: p.id,
+            en: p.en_sentence,
+            ko: p.ko_sentence,
+          })),
+        };
+
+        const efData = await invokeRecommendAI(invokeBody);
+        console.log('[recommend_ai] response', efData);
+        const efResults = efData?.results ?? [];
+
+        // 4) 추천 결과(path)를 category_id로 변환 + leaf만 유지
+        const recMap = {};
+        const rawUnmatched = {};
+        const rawNonLeaf = {};
+        for (const r of efResults) {
+          const pid = r?.pair_id;
+          const items = r?.recs ?? [];
+          if (!pid) continue;
+          const arr = [];
+          for (const it of items) {
+            const path = (it?.path ?? '').trim();
+            if (!path) continue;
+
+            const cid = resolvePath(path);
+            if (!cid) {
+              (rawUnmatched[pid] ||= []).push(path);
+              continue;
+            }
+            if (!allLeaves.has(cid)) {
+              (rawNonLeaf[pid] ||= []).push(pathLabelLocal(cid, path, allMeta));
+              continue;
+            }
+            if (arr.findIndex((x) => x.category_id === cid) === -1) {
+              arr.push({ category_id: cid, score: null, rank: null });
+            }
+          }
+          if (arr.length > 0) recMap[pid] = arr;
+        }
+
+        // 5) 기존 선택값 불러오기
         const pairIds = (pairRows ?? []).map((p) => p.id).filter(Boolean);
         let selRows = [];
         if (pairIds.length > 0) {
@@ -63,31 +143,20 @@ export default function CategoryRecommendPage() {
           selRows = data ?? [];
         }
 
-        if (!alive) return;
-        const recMap = {};
-        const allCatIds = new Set();
-        for (const r of recRows ?? []) {
-          if (!r?.pair_id || !r?.category_id) continue;
-          (recMap[r.pair_id] ||= []).push({ category_id: r.category_id });
-          allCatIds.add(r.category_id);
-        }
-
         const selMap = {};
         for (const id of pairIds) selMap[id] = new Set();
         for (const s of selRows) {
           if (!s?.pair_id || !s?.category_id) continue;
           (selMap[s.pair_id] ||= new Set()).add(s.category_id);
-          allCatIds.add(s.category_id);
         }
 
-        const { meta, leaves } = await loadCategoryMetaWithLeaves(allCatIds);
         if (!alive) return;
 
         setPairs(pairRows ?? []);
         setRecs(recMap);
+        setUnmatched(rawUnmatched);
+        setNonLeaf(rawNonLeaf);
         setSelected(selMap);
-        setCatMeta(meta);
-        setLeafIds(leaves);
       } catch (err) {
         console.error('[CategoryRecommendPage] init error', err);
         alert(`불러오기 오류: ${err.message}`);
@@ -100,54 +169,92 @@ export default function CategoryRecommendPage() {
     };
   }, [materialId]);
 
-  async function loadCategoryMetaWithLeaves(initialIds) {
-    const meta = {};
-    const fetched = new Set();
-    async function fetchByIds(ids) {
-      if (ids.length === 0) return;
-      const { data, error } = await supabase
-        .from('category_nodes')
-        .select('id, name, parent_id')
-        .in('id', ids);
-      if (error) throw error;
-      for (const n of data ?? []) {
-        meta[n.id] = { name: n.name, parent_id: n.parent_id };
-        fetched.add(n.id);
-      }
-    }
-    await fetchByIds(Array.from(initialIds ?? []));
-    for (let depth = 0; depth < 2; depth++) {
-      const needParents = [];
-      for (const id of Object.keys(meta)) {
-        const pid = meta[id]?.parent_id;
-        if (pid && !fetched.has(pid)) needParents.push(pid);
-      }
-      if (needParents.length === 0) break;
-      await fetchByIds(Array.from(new Set(needParents)));
-    }
-    const candidateIds = Object.keys(meta);
-    const { data: children, error: eKids } = await supabase
+  // --- Helpers --------------------------------------------------------------
+
+  async function loadAllCategories() {
+    const { data, error } = await supabase
       .from('category_nodes')
-      .select('parent_id')
-      .in('parent_id', candidateIds);
-    if (eKids) throw eKids;
-    const hasChild = new Set(
-      (children ?? []).map((r) => r.parent_id).filter(Boolean)
-    );
-    const leaves = new Set(candidateIds.filter((id) => !hasChild.has(id)));
-    return { meta, leaves };
+      .select('id, name, parent_id');
+    if (error) throw error;
+
+    const norm = (s = '') =>
+      s
+        .normalize('NFKC')
+        .replace(/\s+/g, ' ')
+        .replace(/\s*>\s*/g, '>')
+        .replace(/\s*\(\s*/g, '(')
+        .replace(/\s*\)\s*/g, ')')
+        .trim();
+
+    const meta = {};
+    const childrenByParent = new Map();
+    const byParentName = new Map();
+    const childCount = new Map();
+
+    for (const n of data ?? []) {
+      meta[n.id] = { name: n.name, parent_id: n.parent_id ?? null };
+      const pid = n.parent_id ?? 'root';
+      const arr = childrenByParent.get(pid) || [];
+      arr.push(n);
+      childrenByParent.set(pid, arr);
+
+      const key = `${pid}|||${norm(n.name)}`;
+      byParentName.set(key, n.id);
+
+      if (n.parent_id) {
+        childCount.set(n.parent_id, (childCount.get(n.parent_id) || 0) + 1);
+      }
+    }
+
+    const leaves = new Set(Object.keys(meta).filter((id) => !childCount.has(id)));
+
+    function resolvePath(path) {
+      const raw = (path ?? '').toString();
+      if (!raw) return null;
+
+      const parts = raw.split('>').map((s) => s.trim()).filter(Boolean);
+      if (parts.length === 0) return null;
+
+      let parent = 'root';
+      let curId = null;
+
+      for (const part of parts) {
+        const p0 = norm(part);
+        const exactKey = `${parent}|||${p0}`;
+        let found = byParentName.get(exactKey);
+
+        if (!found) {
+          const candidates = childrenByParent.get(parent) || [];
+          const pick = (fn) => candidates.find(fn);
+          const c1 = pick((n) => norm(n.name) === p0);
+          const c2 = c1 || pick((n) => norm(n.name).startsWith(p0) || p0.startsWith(norm(n.name)));
+          const c3 = c2 || pick((n) => norm(n.name).includes(p0) || p0.includes(norm(n.name)));
+          if (c1 || c2 || c3) found = (c1 || c2 || c3).id;
+        }
+
+        if (!found) return null;
+        curId = found;
+        parent = found;
+      }
+
+      return curId;
+    }
+
+    return { meta, leaves, resolvePath };
   }
 
-  const pathLabel = (categoryId, fallback) => {
+  const pathLabelLocal = (categoryId, fallback, metaObj) => {
     if (!categoryId) return fallback || '(이름 없음)';
     const names = [];
     let cur = categoryId;
-    while (cur && catMeta[cur]) {
-      names.unshift(catMeta[cur].name);
-      cur = catMeta[cur].parent_id;
+    while (cur && metaObj[cur]) {
+      names.unshift(metaObj[cur].name);
+      cur = metaObj[cur].parent_id;
     }
     return names.join('→') || fallback || '(이름 없음)';
   };
+
+  const pathLabel = (categoryId, fallback) => pathLabelLocal(categoryId, fallback, catMeta);
 
   const toggle = (pairId, categoryId) => {
     if (!pairId || !categoryId) return;
@@ -200,11 +307,11 @@ export default function CategoryRecommendPage() {
         pair_id: pairId,
         category_ids: Array.from(set || []),
       }));
-      const { error } = await supabase.rpc('material_save_pair_categories', {
+      const { error: e1 } = await supabase.rpc('material_save_pair_categories', {
         p_material_id: materialId,
         p_selections: selections,
       });
-      if (error) throw error;
+      if (e1) throw e1;
       alert('저장되었습니다.');
     } catch (err) {
       alert(`저장 오류: ${err.message}`);
@@ -218,8 +325,9 @@ export default function CategoryRecommendPage() {
           <div>
             <div className="ui-title">문장별 자동 분류 추천</div>
             <div className="ui-sub">
-              추천은 <b>최하위 분류만</b> 표시하며, 라벨은 경로로 보여줍니다.
-              (예: 품사→명사→보통명사)
+              추천은 <b>최하위 분류만</b> 표시하며,{' '}
+              <b>영문(en_sentence) 기준</b>으로 계산됩니다.
+              라벨은 경로로 보여줘요 (예: 품사→명사→보통명사).
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -244,12 +352,23 @@ export default function CategoryRecommendPage() {
           pairs.map((p) => {
             const checked = selected[p.id] ?? new Set();
             const baseRec = (recs[p.id] ?? []).filter(
-              (v, i, a) =>
-                a.findIndex((x) => x.category_id === v.category_id) === i
+              (v, i, a) => a.findIndex((x) => x.category_id === v.category_id) === i
             );
             const leafOnly = baseRec.filter((r) => leafIds.has(r.category_id));
+
             return (
               <div key={p.id} className="ui-card" style={{ marginBottom: 20 }}>
+                <div
+                  className="ui-sub"
+                  style={{
+                    borderBottom: '1px dashed #e6edf7',
+                    paddingBottom: 6,
+                    marginBottom: 8,
+                  }}
+                >
+                  문장 ID: <b>{String(p.id).slice(0, 8)}</b>
+                </div>
+
                 <div
                   className="pair-grid"
                   style={{
@@ -274,7 +393,7 @@ export default function CategoryRecommendPage() {
 
                     <div style={{ marginTop: 12 }}>
                       <span className="ui-sub">
-                        추천 분류 <small>(최하위만)</small>
+                        추천 분류 <small>(최하위만, EN 기준)</small>
                       </span>
                       <div
                         style={{
@@ -293,9 +412,7 @@ export default function CategoryRecommendPage() {
                           return (
                             <button
                               key={cid}
-                              className={`ui-btn sm ${
-                                on ? 'primary' : ''
-                              }`}
+                              className={`ui-btn sm ${on ? 'primary' : ''}`}
                               onClick={() => toggle(p.id, cid)}
                             >
                               {pathLabel(cid)}
@@ -303,6 +420,46 @@ export default function CategoryRecommendPage() {
                           );
                         })}
                       </div>
+
+                      {(nonLeaf[p.id] ?? []).length > 0 && (
+                        <div style={{ marginTop: 8 }}>
+                          <span className="ui-sub">리프가 아닌 추천(경로 확인 필요)</span>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: 8,
+                              marginTop: 4,
+                            }}
+                          >
+                            {(nonLeaf[p.id] ?? []).map((lbl, i) => (
+                              <span key={i} className="ui-badge" title="DB 트리에서 이 경로가 최하위가 아닙니다.">
+                                {lbl}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {(unmatched[p.id] ?? []).length > 0 && (
+                        <div style={{ marginTop: 8 }}>
+                          <span className="ui-sub">미등록/미매핑 경로</span>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: 8,
+                              marginTop: 4,
+                            }}
+                          >
+                            {(unmatched[p.id] ?? []).map((raw, idx) => (
+                              <span key={idx} className="ui-badge" title="DB 트리와 문자열이 달라 매핑 실패">
+                                {raw}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -323,9 +480,7 @@ export default function CategoryRecommendPage() {
                     </div>
 
                     <div>
-                      <span className="ui-sub">
-                        분류 검색 (기존 분류 · 복수 선택 가능)
-                      </span>
+                      <span className="ui-sub">분류 검색 (기존 분류 · 복수 선택 가능)</span>
                       <input
                         className="ui-input"
                         style={{
