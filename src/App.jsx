@@ -64,18 +64,9 @@ export default function App() {
           }
         />
 
-        {/* 자동 분류 추천 (문장별 추천 후 복수 선택 저장) */}
-        {/* 두 가지 파라미터 패턴 모두 지원 */}
+        {/* 자동 분류 추천: 단일 패턴로 통일 */}
         <Route
-          path="/category/recommend/:id"   // :id = material_id (uuid)
-          element={
-            <Protected>
-              <CategoryRecommendPage />
-            </Protected>
-          }
-        />
-        <Route
-          path="/category/recommend/:materialId" // :materialId = material_id (uuid)
+          path="/category/recommend/:materialId"
           element={
             <Protected>
               <CategoryRecommendPage />

@@ -1,5 +1,5 @@
 // src/pages/CategoryRecommendPage.jsx
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { supabase } from '../utils/supabaseClient';
 // import { recommendForPairs } from '../utils/ai'; // ❌ 사용 안 함 (메모리 추천으로 교체)
@@ -58,8 +58,12 @@ export default function CategoryRecommendPage() {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState({});
   const [results, setResults] = useState({});
-  const [unmatched, setUnmatched] = useState({});
-  const [nonLeaf, setNonLeaf] = useState({});
+  const [unmatched, setUnmatched] = useState({}); // 매핑 실패한 경로 문자열
+  const [nonLeaf, setNonLeaf] = useState({});     // 리프가 아닌 추천 경로
+
+  // 🔹 난이도 상태 + 디바운서
+  const [difficultyMap, setDifficultyMap] = useState({});
+  const diffTimersRef = useRef({});
 
   useEffect(() => {
     let alive = true;
@@ -69,10 +73,10 @@ export default function CategoryRecommendPage() {
           throw new Error(`잘못된 materialId: ${materialId || '(없음)'}`);
         setLoading(true);
 
-        // 1) 문장/순서/한영
+        // 1) 문장/순서/한영/난이도
         const { data: pairRows, error: e1 } = await supabase
           .from('material_pairs')
-          .select('id, en_sentence, ko_sentence, order_index')
+          .select('id, en_sentence, ko_sentence, order_index, difficulty')
           .eq('material_id', materialId)
           .order('order_index', { ascending: true });
         if (e1) throw e1;
@@ -89,7 +93,6 @@ export default function CategoryRecommendPage() {
         const rawUnmatched = {};
         const rawNonLeaf = {};
 
-        // 문장별 병렬 호출
         await Promise.all(
           (pairRows ?? []).map(async (p) => {
             const { data, error } = await supabase.rpc('memory_recommend_for_text', {
@@ -98,7 +101,6 @@ export default function CategoryRecommendPage() {
               p_top_n: 6,
             });
             if (error) {
-              // RPC가 없거나 초기엔 데이터가 없어도 에러 없이 빈 추천일 수 있음
               console.warn('[memory_recommend_for_text] error', error);
               return;
             }
@@ -150,13 +152,19 @@ export default function CategoryRecommendPage() {
           (selMap[s.pair_id] ||= new Set()).add(s.category_id);
         }
 
-        if (!alive) return;
+        // 5) 난이도 초기화
+        const nextDiff = {};
+        for (const p of pairRows ?? []) {
+          nextDiff[p.id] = p.difficulty ?? '';
+        }
 
+        if (!alive) return;
         setPairs(pairRows ?? []);
         setRecs(recMap);
         setUnmatched(rawUnmatched);
         setNonLeaf(rawNonLeaf);
         setSelected(selMap);
+        setDifficultyMap(nextDiff);
       } catch (err) {
         console.error('[CategoryRecommendPage] init error', err);
         alert(`불러오기 오류: ${err.message}`);
@@ -170,13 +178,13 @@ export default function CategoryRecommendPage() {
   }, [materialId]);
 
   // --- Helpers --------------------------------------------------------------
-
   async function loadAllCategories() {
     const { data, error } = await supabase
       .from('category_nodes')
       .select('id, name, parent_id');
     if (error) throw error;
 
+    // 이름 정규화(공백/괄호/구분자 오차 완화)
     const norm = (s = '') =>
       s
         .normalize('NFKC')
@@ -306,7 +314,9 @@ export default function CategoryRecommendPage() {
       // 2) 학습 데이터 누적 (선택된 분류를 텍스트 경로로 저장)
       await Promise.all(
         (pairs ?? []).map(async (p) => {
-          const chosenIds = Array.from(selected[p.id] ?? []);
+          const chosenIds = Array.from(selected[p.id] ?? []).filter((cid) =>
+            leafIds.has(cid)
+          );
           if (chosenIds.length === 0) return;
           const paths = chosenIds
             .map((cid) => pathStringForDB(cid, catMeta))
@@ -330,6 +340,36 @@ export default function CategoryRecommendPage() {
     }
   };
 
+  // 🔹 난이도 변경 시 자동 저장 (0.5s 디바운스)
+  function onChangeDifficulty(pairId, value) {
+    setDifficultyMap((prev) => ({ ...prev, [pairId]: value ?? '' }));
+    const timers = diffTimersRef.current;
+    if (timers[pairId]) clearTimeout(timers[pairId]);
+    timers[pairId] = setTimeout(async () => {
+      try {
+        const { error } = await supabase.rpc('material_update_pair_difficulty', {
+          p_pair_id: pairId,
+          p_difficulty: value || null,
+        });
+        if (error) throw error;
+      } catch (e) {
+        console.error('[difficulty save]', e?.message || e);
+      } finally {
+        delete timers[pairId];
+      }
+    }, 500);
+  }
+
+  const difficultyLabel = (code) =>
+    code === 'easy'
+      ? '쉬움'
+      : code === 'normal'
+      ? '보통'
+      : code === 'hard'
+      ? '어려움'
+      : '(선택)';
+
+  // --------------------------------------------------------------------
   return (
     <div className="ui-page">
       <div className="ui-wrap">
@@ -337,8 +377,7 @@ export default function CategoryRecommendPage() {
           <div>
             <div className="ui-title">문장별 자동 분류 추천</div>
             <div className="ui-sub">
-              추천은 <b>최하위 분류만</b> 표시하며, <b>영문(en_sentence) 기준</b> +{' '}
-              <b>누적 학습 데이터</b>로 계산됩니다. 각 추천에는 <b>한국어 이유</b>가 함께 제공됩니다.
+              추천은 <b>최하위 분류만</b> 표시하며, <b>영문(en_sentence) 기준</b> + <b>누적 학습 데이터</b>로 계산됩니다. 각 추천에는 <b>한국어 이유</b>가 함께 제공됩니다.
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -351,7 +390,7 @@ export default function CategoryRecommendPage() {
 
         <div className="ui-card" style={{ marginBottom: 16 }}>
           <div className="ui-toolbar" style={{ justifyContent: 'flex-end' }}>
-            <button className="ui-btn primary" onClick={saveAll}>
+            <button type="button" className="ui-btn primary" onClick={saveAll}>
               저장
             </button>
           </div>
@@ -388,17 +427,10 @@ export default function CategoryRecommendPage() {
                     gap: 16,
                   }}
                 >
+                  {/* 좌측: 영문 + 추천 */}
                   <div>
                     <span className="ui-sub">영문</span>
-                    <div
-                      className="ui-card"
-                      style={{
-                        border: '1px solid #e9eef5',
-                        background: '#f9fbff',
-                        fontSize: 14,
-                        marginTop: 6,
-                      }}
-                    >
+                    <div className="ui-card" style={{ background: '#f9fbff', marginTop: 6 }}>
                       {p.en_sentence}
                     </div>
 
@@ -422,6 +454,7 @@ export default function CategoryRecommendPage() {
                           return (
                             <div key={cid} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                               <button
+                                type="button"
                                 className={`ui-btn sm ${on ? 'primary' : ''}`}
                                 title={r.reason || ''}
                                 onClick={() => toggle(p.id, cid)}
@@ -480,47 +513,43 @@ export default function CategoryRecommendPage() {
                     </div>
                   </div>
 
+                  {/* 우측: 한글 + 난이도 + 검색 */}
                   <div style={{ display: 'grid', gap: 10 }}>
                     <div>
                       <span className="ui-sub">한국어 해석</span>
-                      <div
-                        className="ui-card"
-                        style={{
-                          border: '1px solid #e9eef5',
-                          background: '#f9fbff',
-                          fontSize: 14,
-                          marginTop: 6,
-                        }}
-                      >
+                      <div className="ui-card" style={{ background: '#f9fbff', marginTop: 6 }}>
                         {p.ko_sentence}
                       </div>
+                    </div>
+
+                    {/* 🔹 난이도 드롭다운 */}
+                    <div>
+                      <span className="ui-sub">난이도</span>
+                      <select
+                        className="ui-input"
+                        style={{ width: '100%', marginTop: 4 }}
+                        value={difficultyMap[p.id] ?? ''}
+                        onChange={(e) => onChangeDifficulty(p.id, e.target.value)}
+                      >
+                        <option value="">{difficultyLabel('')}</option>
+                        <option value="easy">쉬움</option>
+                        <option value="normal">보통</option>
+                        <option value="hard">어려움</option>
+                      </select>
                     </div>
 
                     <div>
                       <span className="ui-sub">분류 검색 (기존 분류 · 복수 선택 가능)</span>
                       <input
                         className="ui-input"
-                        style={{
-                          width: '100%',
-                          padding: '10px 12px',
-                          border: '1px solid #d8e2ef',
-                          borderRadius: 10,
-                          marginTop: 4,
-                        }}
                         placeholder="예: 품사, 보통명사"
                         value={query[p.id] ?? ''}
                         onChange={(e) => searchCats(p.id, e.target.value)}
                       />
-                      <div
-                        style={{
-                          display: 'flex',
-                          flexWrap: 'wrap',
-                          gap: 8,
-                          marginTop: 6,
-                        }}
-                      >
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
                         {(results[p.id] ?? []).map((cat) => (
                           <button
+                            type="button"
                             key={cat.id}
                             className="ui-btn sm"
                             onClick={() => addFromSearch(p.id, cat)}
@@ -533,17 +562,8 @@ export default function CategoryRecommendPage() {
 
                     <div>
                       <span className="ui-sub">현재 선택</span>
-                      <div
-                        style={{
-                          display: 'flex',
-                          flexWrap: 'wrap',
-                          gap: 8,
-                          marginTop: 6,
-                        }}
-                      >
-                        {Array.from(checked).length === 0 && (
-                          <span className="ui-sub">선택된 분류가 없습니다.</span>
-                        )}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                        {Array.from(checked).length === 0 && <span className="ui-sub">선택된 분류가 없습니다.</span>}
                         {Array.from(checked).map((cid) => (
                           <span key={cid} className="ui-badge">
                             {pathLabel(cid)}
@@ -558,18 +578,17 @@ export default function CategoryRecommendPage() {
           })}
 
         <div className="ui-toolbar" style={{ justifyContent: 'space-between' }}>
-          <button className="ui-btn" onClick={() => nav(-1)}>
+          <button type="button" className="ui-btn" onClick={() => nav(-1)}>
             검수 편집으로 돌아가기
           </button>
-          <button className="ui-btn primary" onClick={saveAll}>
+          <button type="button" className="ui-btn primary" onClick={saveAll}>
             저장
           </button>
         </div>
 
         <style>{`
-          @media (max-width: 800px){
+          @media (max-width: 800px) {
             .pair-grid {
-              display: grid !important;
               grid-template-columns: 1fr !important;
             }
           }

@@ -103,7 +103,6 @@ export async function saveMaterialWithPairs(payload) {
   await overwritePairs(materialId, pairs);
 
   // 3) en_text / ko_text 갱신
-  //   - pairs에 en_sentence/ko_sentence가 들어온다고 가정 (과거 en/ko도 대응)
   const normalized = pairs.map(p => ({
     en_sentence: p.en_sentence ?? p.en ?? '',
     ko_sentence: p.ko_sentence ?? p.ko ?? '',
@@ -126,7 +125,7 @@ export async function saveMaterialWithPairs(payload) {
 /**
  * 자료 + 문장쌍 조회
  * - materials: 단건
- * - material_pairs: en_sentence / ko_sentence / order_index
+ * - material_pairs: en_sentence / ko_sentence / order_index / used_in / difficulty
  */
 export async function fetchMaterialWithPairs(materialId) {
   const { data: material, error: e1 } = await supabase
@@ -138,12 +137,57 @@ export async function fetchMaterialWithPairs(materialId) {
 
   const { data: pairs, error: e2 } = await supabase
     .from('material_pairs')
-    .select('id, material_id, en_sentence, ko_sentence, order_index')
+    .select('id, material_id, en_sentence, ko_sentence, order_index, used_in, difficulty')
     .eq('material_id', materialId)
     .order('order_index', { ascending: true });
   if (e2) throw new Error(`[fetchMaterialWithPairs] ${e2.message}`);
 
   return { material, pairs };
+}
+
+/**
+ * ✍️ 교재 메모(used_in) 저장 RPC
+ * - material_update_pair_used_in(bigint, text)
+ */
+export async function updatePairUsedIn(pairId, usedIn) {
+  const { error } = await supabase.rpc('material_update_pair_used_in', {
+    p_pair_id: pairId,
+    p_used_in: usedIn ?? null,
+  });
+  if (error) throw new Error(`[material_update_pair_used_in] ${error.message}`);
+}
+
+/**
+ * (옵션) 여러 문장 메모를 한 번에 저장
+ * updates: Array<{ pair_id: number, used_in: string | null }>
+ */
+export async function bulkUpdatePairUsedIn(updates = []) {
+  for (const u of updates) {
+    await updatePairUsedIn(u.pair_id, u.used_in ?? null);
+  }
+}
+
+/**
+ * ✍️ 난이도 저장 RPC
+ * - material_update_pair_difficulty(bigint, text|null)
+ *   difficulty ∈ ('easy','normal','hard') 또는 null
+ */
+export async function updatePairDifficulty(pairId, difficulty) {
+  const { error } = await supabase.rpc('material_update_pair_difficulty', {
+    p_pair_id: pairId,
+    p_difficulty: difficulty ?? null,
+  });
+  if (error) throw new Error(`[material_update_pair_difficulty] ${error.message}`);
+}
+
+/**
+ * (옵션) 여러 문장 난이도 일괄 저장
+ * updates: Array<{ pair_id: number, difficulty: 'easy'|'normal'|'hard'|null }>
+ */
+export async function bulkUpdatePairDifficulty(updates = []) {
+  for (const u of updates) {
+    await updatePairDifficulty(u.pair_id, u.difficulty ?? null);
+  }
 }
 
 /**
