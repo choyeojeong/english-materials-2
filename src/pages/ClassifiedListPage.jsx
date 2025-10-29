@@ -8,8 +8,8 @@ import '../styles/ui.css';
 export default function ClassifiedListPage() {
   const nav = useNavigate();
 
-  const [tab, setTab] = useState('item');     // 기본: 자료별 보기
-  const [status, setStatus] = useState('all'); // all | done
+  const [tab, setTab] = useState('item');
+  const [status, setStatus] = useState('all');
   const [rows, setRows] = useState([]);
   const [catRows, setCatRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -20,13 +20,12 @@ export default function ClassifiedListPage() {
   const saveTimersRef = useRef({});
   const diffTimersRef = useRef({});
 
-  // ===================== 데이터 로드 =====================
   useEffect(() => {
     if (tab === 'item') fetchMaterials();
     else fetchByCategory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, status]);
 
+  // ✅ 자료 로드
   async function fetchMaterials() {
     setLoading(true);
     const { data, error } = await supabase
@@ -38,25 +37,19 @@ export default function ClassifiedListPage() {
     setLoading(false);
   }
 
-  // ✅ 분류된 문장 + 미분류 문장 모두 포함
+  // ✅ 분류된 + 미분류 문장 로드
   async function fetchByCategory() {
     setLoading(true);
 
-    // 1) 분류된 문장: 기존 뷰 사용
-    const { data: viewData, error: viewErr } = await supabase
+    const { data: viewData } = await supabase
       .from('v_category_pair_sentences')
       .select('*')
       .limit(5000);
-    if (viewErr) {
-      console.error('[fetchByCategory:view]', viewErr.message);
-    }
-    // 상태 필터
+
     const categorized = (viewData ?? []).filter((r) =>
       status === 'done' ? r.material_status === 'done' : true
     );
 
-    // 2) 미분류 문장: material_pair_categories가 없는 pair
-    // LEFT JOIN 후 NULL인 것만 가져오기
     let uncReq = supabase
       .from('material_pairs')
       .select(
@@ -68,10 +61,7 @@ export default function ClassifiedListPage() {
     if (status === 'done') {
       uncReq = uncReq.eq('materials.status', 'done');
     }
-    const { data: uncData, error: uncErr } = await uncReq;
-    if (uncErr) {
-      console.error('[fetchByCategory:uncategorized]', uncErr.message);
-    }
+    const { data: uncData } = await uncReq;
 
     const uncategorized = (uncData ?? []).map((u) => ({
       category_id: null,
@@ -86,11 +76,9 @@ export default function ClassifiedListPage() {
       difficulty: u.difficulty ?? '',
     }));
 
-    // 3) 합치기
     const merged = [...categorized, ...uncategorized];
     setCatRows(merged);
 
-    // 초기 입력값 맵
     const nextUsed = {};
     const nextDiff = {};
     for (const r of merged) {
@@ -99,72 +87,34 @@ export default function ClassifiedListPage() {
     }
     setUsedInMap(nextUsed);
     setDifficultyMap(nextDiff);
-
     setLoading(false);
   }
 
-  // ===================== 가공 =====================
-  const groupedCats = useMemo(() => {
-    const qn = q.trim().toLowerCase();
-    const map = new Map();
-    for (const r of catRows) {
-      const cid = r.category_id ?? 'UNCAT';
-      const cname = r.category_name ?? '(미분류)';
-      if (qn && !cname.toLowerCase().includes(qn)) continue;
-
-      if (!map.has(cid)) {
-        map.set(cid, { category_id: cid, category_name: cname, items: [] });
-      }
-      map.get(cid).items.push({
-        pair_id: r.pair_id,
-        en_sentence: r.en_sentence,
-        ko_sentence: r.ko_sentence,
-        material_id: r.material_id,
-        material_title: r.material_title,
-        used_in: r.used_in ?? '',
-        difficulty: r.difficulty ?? '',
-      });
+  // ✅ 자료 삭제
+  async function deleteMaterial(id) {
+    if (!window.confirm('이 자료를 정말 삭제하시겠습니까?')) return;
+    const { error } = await supabase.from('materials').delete().eq('id', id);
+    if (error) alert('삭제 실패: ' + error.message);
+    else {
+      alert('삭제 완료!');
+      fetchMaterials();
     }
-    return Array.from(map.values()).sort(
-      (a, b) => b.items.length - a.items.length
-    );
-  }, [catRows, q]);
-
-  // ===================== 저장 핸들러 =====================
-  function onUsedInChange(pairId, value) {
-    setUsedInMap((prev) => ({ ...prev, [pairId]: value }));
-    if (saveTimersRef.current[pairId])
-      clearTimeout(saveTimersRef.current[pairId]);
-    saveTimersRef.current[pairId] = setTimeout(async () => {
-      try {
-        await supabase.rpc('material_update_pair_used_in', {
-          p_pair_id: pairId,
-          p_used_in: value?.trim() || null,
-        });
-      } catch (e) {
-        console.error('saveUsedIn', e.message);
-      } finally {
-        delete saveTimersRef.current[pairId];
-      }
-    }, 600);
   }
 
-  function onDifficultyChange(pairId, value) {
-    setDifficultyMap((prev) => ({ ...prev, [pairId]: value }));
-    if (diffTimersRef.current[pairId])
-      clearTimeout(diffTimersRef.current[pairId]);
-    diffTimersRef.current[pairId] = setTimeout(async () => {
-      try {
-        await supabase.rpc('material_update_pair_difficulty', {
-          p_pair_id: pairId,
-          p_difficulty: value || null,
-        });
-      } catch (e) {
-        console.error('saveDifficulty', e.message);
-      } finally {
-        delete diffTimersRef.current[pairId];
-      }
-    }, 600);
+  // ✅ 문장 삭제
+  async function deleteSentence(pairId) {
+    if (!window.confirm('이 문장을 정말 삭제하시겠습니까?')) return;
+    const { error } = await supabase.from('material_pairs').delete().eq('id', pairId);
+    if (error) alert('삭제 실패: ' + error.message);
+    else {
+      alert('삭제 완료!');
+      fetchByCategory();
+    }
+  }
+
+  // ✅ 공통
+  function toggleExpand(catId) {
+    setExpanded((p) => ({ ...p, [catId]: !p[catId] }));
   }
 
   function renderDifficultyBadge(code) {
@@ -178,29 +128,60 @@ export default function ClassifiedListPage() {
         ? '#3b82f6'
         : '#ef4444';
     return (
-      <span
-        className="ui-badge"
-        style={{ background: color, color: '#fff', fontWeight: 600 }}
-      >
+      <span className="ui-badge" style={{ background: color, color: '#fff', fontWeight: 600 }}>
         {text}
       </span>
     );
   }
 
-  function toggleExpand(catId) {
-    setExpanded((p) => ({ ...p, [catId]: !p[catId] }));
+  // ✅ 자동 저장
+  function onUsedInChange(pairId, value) {
+    setUsedInMap((prev) => ({ ...prev, [pairId]: value }));
+    if (saveTimersRef.current[pairId])
+      clearTimeout(saveTimersRef.current[pairId]);
+    saveTimersRef.current[pairId] = setTimeout(async () => {
+      await supabase.rpc('material_update_pair_used_in', {
+        p_pair_id: pairId,
+        p_used_in: value?.trim() || null,
+      });
+    }, 600);
   }
+
+  function onDifficultyChange(pairId, value) {
+    setDifficultyMap((prev) => ({ ...prev, [pairId]: value }));
+    if (diffTimersRef.current[pairId])
+      clearTimeout(diffTimersRef.current[pairId]);
+    diffTimersRef.current[pairId] = setTimeout(async () => {
+      await supabase.rpc('material_update_pair_difficulty', {
+        p_pair_id: pairId,
+        p_difficulty: value || null,
+      });
+    }, 600);
+  }
+
+  // ✅ 분류 그룹화
+  const groupedCats = useMemo(() => {
+    const qn = q.trim().toLowerCase();
+    const map = new Map();
+    for (const r of catRows) {
+      const cid = r.category_id ?? 'UNCAT';
+      const cname = r.category_name ?? '(미분류)';
+      if (qn && !cname.toLowerCase().includes(qn)) continue;
+      if (!map.has(cid)) map.set(cid, { category_id: cid, category_name: cname, items: [] });
+      map.get(cid).items.push(r);
+    }
+    return Array.from(map.values()).sort((a, b) => b.items.length - a.items.length);
+  }, [catRows, q]);
 
   // ===================== UI =====================
   return (
     <div className="ui-page">
       <div className="ui-wrap">
-        {/* 헤더 */}
         <div className="ui-head">
           <div>
-            <div className="ui-title">분류 완료 목록</div>
+            <div className="ui-title">분류 목록 관리</div>
             <div className="ui-sub">
-              완료되지 않은 자료도 포함해, 교재 메모와 난이도를 함께 관리합니다.
+              저장된 자료 및 문장을 삭제하거나 이어서 수정할 수 있습니다.
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -210,7 +191,7 @@ export default function ClassifiedListPage() {
           </div>
         </div>
 
-        {/* 탭 + 상태 필터 + 검색 */}
+        {/* 탭 */}
         <div className="ui-card">
           <div className="ui-tabs">
             <button
@@ -223,91 +204,54 @@ export default function ClassifiedListPage() {
               className={`ui-tab ${tab === 'category' ? 'active' : ''}`}
               onClick={() => setTab('category')}
             >
-              분류별 보기
+              문장별 보기
             </button>
-          </div>
-
-          <div className="ui-toolbar" style={{ justifyContent: 'space-between' }}>
-            <div className="ui-toolbar" role="tablist">
-              <button
-                className={`ui-btn sm ${status === 'all' ? 'primary' : ''}`}
-                onClick={() => setStatus('all')}
-              >
-                전체(all)
-              </button>
-              <button
-                className={`ui-btn sm ${status === 'done' ? 'primary' : ''}`}
-                onClick={() => setStatus('done')}
-              >
-                완료(done)만
-              </button>
-            </div>
-
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="분류명 검색 (예: 품사, 구동사, 미분류)"
-              style={{
-                width: 260,
-                padding: '8px 10px',
-                border: '1px solid #e3e8f2',
-                borderRadius: 8,
-              }}
-            />
           </div>
         </div>
 
-        {/* 자료별 보기 */}
+        {/* ✅ 자료별 보기 */}
         {tab === 'item' && (
           <div className="ui-card" style={{ marginTop: 12 }}>
             {loading ? (
               <div className="ui-sub">불러오는 중...</div>
             ) : rows.length === 0 ? (
-              <div className="ui-sub">저장된 자료가 없습니다.</div>
+              <div className="ui-sub">자료가 없습니다.</div>
             ) : (
-              <div style={{ display: 'grid', gap: 10 }}>
-                {rows.map((m) => (
-                  <div
-                    key={m.id}
-                    className="ui-card"
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      padding: 12,
-                      cursor: 'pointer',
-                    }}
-                    onClick={() => nav(`/category/recommend/${m.id}`)}
-                  >
-                    <div>
+              rows.map((m) => (
+                <div key={m.id} className="ui-card" style={{ marginBottom: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div onClick={() => nav(`/category/recommend/${m.id}`)} style={{ cursor: 'pointer' }}>
                       <b>{m.title || '(제목 없음)'}</b>
                       <div style={{ fontSize: 13, color: '#5d6b82' }}>
-                        상태: {m.status || '저장됨'}
+                        상태: {m.status || '저장됨'} / {new Date(m.updated_at).toLocaleString('ko-KR')}
                       </div>
                     </div>
-                    <div style={{ fontSize: 12, color: '#888' }}>
-                      {m.updated_at ? new Date(m.updated_at).toLocaleString('ko-KR') : ''}
-                    </div>
+                    <button
+                      className="ui-btn danger sm"
+                      onClick={() => deleteMaterial(m.id)}
+                    >
+                      삭제
+                    </button>
                   </div>
-                ))}
-              </div>
+                </div>
+              ))
             )}
           </div>
         )}
 
-        {/* 분류별 보기 */}
+        {/* ✅ 문장별 보기 */}
         {tab === 'category' && (
           <div className="ui-card" style={{ marginTop: 12 }}>
             {loading ? (
               <div className="ui-sub">불러오는 중...</div>
             ) : groupedCats.length === 0 ? (
-              <div className="ui-sub">표시할 데이터 없음</div>
+              <div className="ui-sub">표시할 문장이 없습니다.</div>
             ) : (
               groupedCats.map((cat) => {
-                const open = !!expanded[cat.category_id];
+                const open = expanded[cat.category_id];
                 return (
                   <div key={cat.category_id} className="ui-card" style={{ marginBottom: 10 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <b>{cat.category_name}</b>
                         <span className="ui-badge">{cat.items.length}문장</span>
@@ -324,12 +268,11 @@ export default function ClassifiedListPage() {
                             <div style={{ fontWeight: 700 }}>{it.en_sentence}</div>
                             <div style={{ color: '#4b5563' }}>{it.ko_sentence}</div>
 
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginTop: 6 }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6 }}>
                               <label style={{ fontSize: 12, color: '#555' }}>난이도:</label>
                               <select
                                 value={difficultyMap[it.pair_id] ?? ''}
-                                onChange={(e) => onDifficultyChange(it.pair_id, e.target.value || null)}
-                                style={{ border: '1px solid #ccc', borderRadius: 6, padding: '4px 6px', fontSize: 13 }}
+                                onChange={(e) => onDifficultyChange(it.pair_id, e.target.value)}
                               >
                                 <option value="">(선택)</option>
                                 <option value="easy">쉬움</option>
@@ -342,7 +285,13 @@ export default function ClassifiedListPage() {
                                 className="ui-btn sm"
                                 onClick={() => nav(`/category/recommend/${it.material_id}`)}
                               >
-                                이 자료로 이동
+                                이동
+                              </button>
+                              <button
+                                className="ui-btn danger sm"
+                                onClick={() => deleteSentence(it.pair_id)}
+                              >
+                                삭제
                               </button>
                             </div>
 
