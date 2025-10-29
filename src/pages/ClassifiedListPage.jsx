@@ -8,9 +8,8 @@ import '../styles/ui.css';
 export default function ClassifiedListPage() {
   const nav = useNavigate();
 
-  const [tab, setTab] = useState('category');
-  const [status, setStatus] = useState('all'); // ✅ 기본값 all
-  const [rows, setRows] = useState([]);
+  const [tab, setTab] = useState('item'); // ✅ 기본을 자료별 보기로 시작
+  const [status, setStatus] = useState('all'); // ✅ 전체 보기
   const [catRows, setCatRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState('');
@@ -22,36 +21,22 @@ export default function ClassifiedListPage() {
 
   // ✅ 데이터 로드
   useEffect(() => {
-    if (tab === 'item') fetchMaterials();
-    else fetchByCategory();
+    fetchViewData();
   }, [tab, status]);
 
-  async function fetchMaterials() {
-    setLoading(true);
-    // ✅ 완료 여부와 관계없이 모든 자료 불러오기
-    const { data, error } = await supabase
-      .from('materials')
-      .select('id, title, status, updated_at')
-      .order('updated_at', { ascending: false })
-      .limit(200);
-    if (!error) setRows(data || []);
-    setLoading(false);
-  }
-
-  async function fetchByCategory() {
+  async function fetchViewData() {
     setLoading(true);
     const { data, error } = await supabase
       .from('v_category_pair_sentences')
       .select('*')
       .limit(5000);
     if (error) {
-      console.error('[fetchByCategory]', error.message);
+      console.error('[fetchViewData]', error.message);
       setCatRows([]);
       setLoading(false);
       return;
     }
 
-    // ✅ status 필터가 'done'일 때만 done만 표시, 아니면 전체
     const filtered =
       status === 'done'
         ? (data ?? []).filter((r) => r.material_status === 'done')
@@ -71,6 +56,28 @@ export default function ClassifiedListPage() {
     setLoading(false);
   }
 
+  // ✅ 자료별 그룹화
+  const groupedMaterials = useMemo(() => {
+    const qn = q.trim().toLowerCase();
+    const map = new Map();
+    for (const r of catRows) {
+      if (qn && !(r.material_title ?? '').toLowerCase().includes(qn)) continue;
+      const key = r.material_id;
+      if (!map.has(key))
+        map.set(key, {
+          material_id: r.material_id,
+          material_title: r.material_title ?? '(제목 없음)',
+          material_status: r.material_status,
+          items: [],
+        });
+      map.get(key).items.push(r);
+    }
+    return Array.from(map.values()).sort(
+      (a, b) => b.items.length - a.items.length
+    );
+  }, [catRows, q]);
+
+  // ✅ 분류별 그룹화
   const groupedCats = useMemo(() => {
     const qn = q.trim().toLowerCase();
     const map = new Map();
@@ -83,15 +90,7 @@ export default function ClassifiedListPage() {
           category_name: r.category_name,
           items: [],
         });
-      map.get(key).items.push({
-        pair_id: r.pair_id,
-        en_sentence: r.en_sentence,
-        ko_sentence: r.ko_sentence,
-        material_id: r.material_id,
-        material_title: r.material_title,
-        used_in: r.used_in ?? '',
-        difficulty: r.difficulty ?? '',
-      });
+      map.get(key).items.push(r);
     }
     return Array.from(map.values()).sort(
       (a, b) => b.items.length - a.items.length
@@ -160,9 +159,9 @@ export default function ClassifiedListPage() {
     );
   };
 
-  function toggleExpand(catId) {
-    setExpanded((p) => ({ ...p, [catId]: !p[catId] }));
-  }
+  const toggleExpand = (id) => {
+    setExpanded((p) => ({ ...p, [id]: !p[id] }));
+  };
 
   return (
     <div className="ui-page">
@@ -171,7 +170,7 @@ export default function ClassifiedListPage() {
           <div>
             <div className="ui-title">분류 완료 목록</div>
             <div className="ui-sub">
-              완료되지 않은 자료도 포함하여, 교재 메모와 난이도를 함께 관리합니다.
+              완료되지 않은 자료도 포함하여 교재 메모와 난이도를 함께 관리합니다.
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -204,7 +203,7 @@ export default function ClassifiedListPage() {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="분류명 검색"
+            placeholder={tab === 'item' ? '자료명 검색' : '분류명 검색'}
             style={{
               width: 240,
               padding: '8px 10px',
@@ -214,7 +213,115 @@ export default function ClassifiedListPage() {
           />
         </div>
 
-        {/* 내용 */}
+        {/* ✅ 자료별 보기 */}
+        {tab === 'item' && (
+          <div className="ui-card" style={{ marginTop: 12 }}>
+            {loading ? (
+              <div className="ui-sub">불러오는 중...</div>
+            ) : groupedMaterials.length === 0 ? (
+              <div className="ui-sub">표시할 자료가 없습니다.</div>
+            ) : (
+              groupedMaterials.map((mat) => {
+                const open = expanded[mat.material_id];
+                return (
+                  <div key={mat.material_id} className="ui-card" style={{ marginBottom: 10 }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <b>{mat.material_title}</b>
+                        <span className="ui-badge">{mat.items.length}문장</span>
+                        <span className="ui-sub">
+                          ({mat.material_status ?? '미완료'})
+                        </span>
+                      </div>
+                      <button className="ui-btn sm" onClick={() => toggleExpand(mat.material_id)}>
+                        {open ? '접기' : '펼치기'}
+                      </button>
+                    </div>
+
+                    {open && (
+                      <div style={{ marginTop: 8, borderLeft: '3px solid #eef3ff', paddingLeft: 8 }}>
+                        {mat.items.map((it) => (
+                          <div key={it.pair_id} className="ui-card" style={{ marginBottom: 8 }}>
+                            <div style={{ fontWeight: 700 }}>{it.en_sentence}</div>
+                            <div style={{ color: '#4b5563' }}>{it.ko_sentence}</div>
+
+                            {/* 난이도 선택 + 분류명 */}
+                            <div
+                              style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: 10,
+                                alignItems: 'center',
+                                marginTop: 6,
+                              }}
+                            >
+                              <label style={{ fontSize: 12, color: '#555' }}>난이도:</label>
+                              <select
+                                value={difficultyMap[it.pair_id] ?? ''}
+                                onChange={(e) =>
+                                  onDifficultyChange(it.pair_id, e.target.value || null)
+                                }
+                                style={{
+                                  border: '1px solid #ccc',
+                                  borderRadius: 6,
+                                  padding: '4px 6px',
+                                  fontSize: 13,
+                                }}
+                              >
+                                <option value="">(선택)</option>
+                                <option value="easy">쉬움</option>
+                                <option value="normal">보통</option>
+                                <option value="hard">어려움</option>
+                              </select>
+                              {renderDifficultyBadge(difficultyMap[it.pair_id])}
+                              <span className="ui-sub">
+                                분류: {it.category_name ?? '-'}
+                              </span>
+                            </div>
+
+                            {/* 교재 메모 입력 */}
+                            <div style={{ marginTop: 8 }}>
+                              <label
+                                style={{
+                                  fontSize: 12,
+                                  color: '#5d6b82',
+                                  display: 'block',
+                                  marginBottom: 4,
+                                }}
+                              >
+                                교재 메모
+                              </label>
+                              <input
+                                value={usedInMap[it.pair_id] ?? ''}
+                                onChange={(e) => onUsedInChange(it.pair_id, e.target.value)}
+                                placeholder="예) 능률보카 3과 / 자작 프린트 5회차"
+                                style={{
+                                  width: '100%',
+                                  padding: '8px 10px',
+                                  border: '1px solid #e3e8f2',
+                                  borderRadius: 8,
+                                  fontSize: 13,
+                                }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+
+        {/* ✅ 분류별 보기 (기존 유지) */}
         {tab === 'category' && (
           <div className="ui-card" style={{ marginTop: 12 }}>
             {loading ? (
@@ -249,7 +356,6 @@ export default function ClassifiedListPage() {
                             <div style={{ fontWeight: 700 }}>{it.en_sentence}</div>
                             <div style={{ color: '#4b5563' }}>{it.ko_sentence}</div>
 
-                            {/* 난이도 선택 + 출처 + 이동 */}
                             <div
                               style={{
                                 display: 'flex',
@@ -259,58 +365,10 @@ export default function ClassifiedListPage() {
                                 marginTop: 6,
                               }}
                             >
-                              <label style={{ fontSize: 12, color: '#555' }}>난이도:</label>
-                              <select
-                                value={difficultyMap[it.pair_id] ?? ''}
-                                onChange={(e) =>
-                                  onDifficultyChange(it.pair_id, e.target.value || null)
-                                }
-                                style={{
-                                  border: '1px solid #ccc',
-                                  borderRadius: 6,
-                                  padding: '4px 6px',
-                                  fontSize: 13,
-                                }}
-                              >
-                                <option value="">(선택)</option>
-                                <option value="easy">쉬움</option>
-                                <option value="normal">보통</option>
-                                <option value="hard">어려움</option>
-                              </select>
                               {renderDifficultyBadge(difficultyMap[it.pair_id])}
-                              <span style={{ fontSize: 13 }}>출처: {it.material_title ?? '-'}</span>
-                              <button
-                                className="ui-btn sm"
-                                onClick={() => nav(`/category/recommend/${it.material_id}`)}
-                              >
-                                이 자료로 이동
-                              </button>
-                            </div>
-
-                            {/* 교재 메모 입력 */}
-                            <div style={{ marginTop: 8 }}>
-                              <label
-                                style={{
-                                  fontSize: 12,
-                                  color: '#5d6b82',
-                                  display: 'block',
-                                  marginBottom: 4,
-                                }}
-                              >
-                                교재 메모
-                              </label>
-                              <input
-                                value={usedInMap[it.pair_id] ?? ''}
-                                onChange={(e) => onUsedInChange(it.pair_id, e.target.value)}
-                                placeholder="예) 능률보카 3과 / 자작 프린트 5회차"
-                                style={{
-                                  width: '100%',
-                                  padding: '8px 10px',
-                                  border: '1px solid #e3e8f2',
-                                  borderRadius: 8,
-                                  fontSize: 13,
-                                }}
-                              />
+                              <span style={{ fontSize: 13 }}>
+                                출처: {it.material_title ?? '-'}
+                              </span>
                             </div>
                           </div>
                         ))}
