@@ -11,7 +11,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-/** ====== 화이트리스트(정적) — 동적 leafPaths가 없을 때 fallback ====== */
+/** ====== 정적 fallback (동적 leafPaths가 없을 때만 사용) ====== */
 const TAXONOMY_FALLBACK: string[] = [
   "품사 > 대명사 > 재귀대명사",
   "품사 > 대명사 > 부정대명사",
@@ -75,38 +75,38 @@ const TAXONOMY_FALLBACK: string[] = [
   "특수 구문 > 생략 구문",
 ];
 
-/** ====== 튜닝 파라미터(정확도/누락 개선) ====== */
+/** ====== 튜닝 파라미터 ====== */
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_TIMEOUT_MS = 1000 * 20;
+const MAX_TOKENS = 900;
+
+const MIN_WORDS = 4;
+const MIN_DEPTH = 2;
 const DEFAULT_MIN_REC = 3;
 const DEFAULT_MAX_REC = 6;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const OPENAI_TIMEOUT_MS = 1000 * 18; // ↑ 약간 여유 (누락 방지)
-const FIRST_TEMP = 0.3;  // ↑ 보수적으로 정확도 우선
-const SECOND_TEMP = 0.6; // ↑ 부족 시 재시도는 다양성 조금 허용
-const MAX_TOKENS = 800;  // ↑ 길이 여유 (누락↓)
-const RETRY_THRESHOLD = 2; // 1차 결과가 2개 이하이면 재질의
-const MIN_WORDS = 4;       // 너무 짧은 문장 제거 기준
-const MIN_DEPTH = 2;       // "상위 > 하위" 이상만 허용
 const DEFAULT_MIN_SCORE = 0.0;
+
+/** 앙상블 샘플 파라미터 */
+const ENSEMBLE_SAMPLES = 3;            // 몇 번 뽑아 합의?
+const ENSEMBLE_TEMPS = [0.2, 0.4, 0.7]; // 보수→중간→살짝 다양성
 
 /** ====== 프롬프트 ====== */
 const SYS_PROMPT = `
 너는 한국 중·고등 영어 교육과정 분류를 위한 문장 분석 보조 교사다.
-
-목표:
-- 입력된 EN/KO 문장을 보고 교육적으로 핵심적인 문법·구문 포인트를 추천한다.
-- 가능한 경우 **리프(leaf) 경로**만 선택한다. (중간 노드 단독 추천 금지)
-- 결과는 JSON으로만 반환하고, 각 추천에 간단한 근거(reason)와 확신도(score: 0~1)를 넣는다.
-- 확신이 매우 낮으면 빈 배열([])도 허용하되, 2차 요청에서는 가능하면 채우도록 한다.
+- 가능한 경우 '리프(leaf)' 경로만 선택(중간 노드 단독 추천 금지)
+- 결과는 JSON으로만 반환하고, 각 추천에 reason(간단 근거)과 score(0~1 확신도)를 포함
+- 규칙: 경로 구분자는 " > " (양쪽 공백 포함), 화이트리스트에 **정확히 일치**하는 경로만
+- 불확실하면 빈 배열 허용(단, 후속 검증 단계에서 보완될 수 있음)
 `.trim();
 
-/** ====== few-shot (모델 힌트) ====== */
+/** few-shot (간단 예시) */
 const FEW_SHOT: Array<{ en: string; ko: string; items: Rec[] }> = [
   {
     en: "I wish I could fly.",
     ko: "나는 날 수 있으면 좋겠다.",
     items: [
       { path: "특수 구문 > 가정법 구문 > I wish 가정법", reason: "I wish + 과거형", score: 0.9 },
-      { path: "문장의 형식 > 3형식", reason: "동사 wish의 3형식 구조", score: 0.6 },
+      { path: "문장의 형식 > 3형식", reason: "wish의 3형식 문형", score: 0.6 },
     ],
   },
   {
@@ -126,7 +126,7 @@ function normalizeSpace(s: string) {
 function depthOfPath(p: string) {
   return normalizeSpace(p).split(">").length;
 }
-function uniq<T>(arr: T[], key: (v: T) => string) {
+function uniqBy<T>(arr: T[], key: (v: T) => string) {
   const seen = new Set<string>();
   const out: T[] = [];
   for (const v of arr) {
@@ -139,7 +139,7 @@ function uniq<T>(arr: T[], key: (v: T) => string) {
   return out;
 }
 
-/** JSON schema 강제 + enum(leaf)로 오출력 방지 */
+/** JSON schema (leaf enum 강제) */
 function schemaDef(leafList: string[]) {
   return {
     type: "json_schema",
@@ -155,8 +155,8 @@ function schemaDef(leafList: string[]) {
               type: "object",
               required: ["path", "reason"],
               properties: {
-                path: { type: "string", enum: leafList },  // 동적 leaf 강제
-                reason: { type: "string", minLength: 2, maxLength: 200 },
+                path: { type: "string", enum: leafList },
+                reason: { type: "string", minLength: 2, maxLength: 220 },
                 score: { type: "number", minimum: 0, maximum: 1 },
               },
               additionalProperties: false,
@@ -171,7 +171,7 @@ function schemaDef(leafList: string[]) {
   } as const;
 }
 
-/** 안전 파서(모델이 코드블록으로 감쌓는 상황 포함) */
+/** 안전 파서 */
 function safeParseItems(jsonText: string): Rec[] {
   try {
     const obj = JSON.parse(jsonText);
@@ -224,7 +224,7 @@ function heuristic(en: string, allow: Set<string>): Rec[] {
   if (/\bto\s+\w+/.test(s)) picks.push("구(Phrase) > to부정사구 > 부사적 용법");
   if (/\b(more|most|less|least|than|as\b.*\bas)\b/.test(s)) picks.push("특수 구문 > 비교급 구문");
 
-  const uniqAllowed = uniq(
+  const uniqAllowed = uniqBy(
     picks.filter(p => allow.has(p)),
     (p) => p
   ).slice(0, DEFAULT_MAX_REC);
@@ -232,19 +232,21 @@ function heuristic(en: string, allow: Set<string>): Rec[] {
   return uniqAllowed.map((p) => ({ path: p, reason: "전형적 패턴(휴리스틱)", score: 0.55 }));
 }
 
-/** 1회 질의 */
+/** 1회 질의(샘플) */
 async function askOnce(opts: {
-  en: string; ko?: string; pass: 1 | 2; temperature: number;
-  leafList: string[]; topN: number;
+  en: string; ko?: string;
+  temperature: number; leafList: string[]; topN: number;
+  minScore: number;
 }): Promise<Rec[]> {
-  const { en, ko, pass, temperature, leafList, topN } = opts;
+  const { en, ko, temperature, leafList, topN, minScore } = opts;
+
   const hints = [
-    `영문(EN)을 우선으로 판단하고, 한국어(KO)는 보조적으로만 사용.`,
+    `EN을 우선으로 판단하고 KO는 보조적으로만 사용.`,
     `권장 개수: ${DEFAULT_MIN_REC}~${topN}개.`,
-    pass === 1 ? `불확실 시 빈 배열([]) 가능.` : `가능하면 빈 배열 대신 적절한 리프 경로를 채워라.`,
-    `경로 구분자는 " > " (양쪽 공백 포함).`,
-    `화이트리스트(leaf)와 **정확히 일치**하는 경로만 허용.`,
+    `경로 구분자는 " > " (양쪽 공백)`,
+    `화이트리스트(leaf)에 **정확히 일치**하는 경로만.`,
     `중복/유사 포인트는 피하고 다양성을 확보.`,
+    `score는 0~1 실수로 추정치라도 반드시 포함.`,
   ];
 
   const shot = FEW_SHOT.map(s => [
@@ -268,7 +270,7 @@ ${shot}
     model: OPENAI_MODEL,
     temperature,
     max_tokens: MAX_TOKENS,
-    response_format: schemaDef(leafList),
+    response_format: { type: "json_schema", json_schema: schemaDef(leafList).json_schema },
     messages: [
       { role: "system", content: SYS_PROMPT },
       { role: "user", content: userContent },
@@ -276,84 +278,174 @@ ${shot}
   });
 
   const raw = data?.choices?.[0]?.message?.content ?? "";
-  let arr = safeParseItems(raw);
-
-  // schema 강제여도 모델이 score 누락할 수 있어 기본값 보정
-  arr = (Array.isArray(arr) ? arr : []).map((r) => ({
+  const arr = safeParseItems(raw);
+  const mapped = (Array.isArray(arr) ? arr : []).map((r) => ({
     path: normalizeSpace(r?.path || ""),
-    reason: (r?.reason || "").toString().slice(0, 200),
+    reason: (r?.reason || "").toString().slice(0, 220),
     score: typeof r?.score === "number" ? r.score : 0.66,
   }));
 
-  return arr;
+  // 1차 필터: 형식/깊이/스코어
+  return mapped.filter(r =>
+    r.path &&
+    depthOfPath(r.path) >= MIN_DEPTH &&
+    (typeof r.score === "number" ? r.score >= minScore : true)
+  ).slice(0, topN);
 }
 
-/** 메인 추천 로직(재시도+필터+휴리스틱) */
+/** Verifier 패스: 1차 합본을 검증/정제 */
+async function verifyAndRefine(en: string, ko: string | undefined, leafList: string[], candidates: Rec[], topN: number, minScore: number): Promise<Rec[]> {
+  const verifierSys = `너는 문장 분류 결과를 검증하는 교사다. 주어진 후보들에서 규칙 위반(리프가 아님, 중복, 논리 불충분)을 제거하고 최적의 상위 ${topN}개를 JSON으로만 반환하라.`;
+  const verifierUser = `
+[문장]
+EN: ${en}
+KO: ${ko || "(없음)"}
+
+[허용 리프 목록]
+${leafList.slice(0, 400).map(p => `- ${p}`).join("\n")}
+
+[후보 목록(JSON)]
+${JSON.stringify({ items: candidates }, null, 2)}
+
+[규칙]
+- 허용 목록에 없는 경로 제거
+- 중간 노드 단독 제거(리프만)
+- 중복 제거
+- reason이 빈약한 항목은 낮은 점수
+- score는 0~1 사이로 보정
+- minScore=${minScore} 미만은 제외
+- 상위 ${topN}개만 남김
+
+[출력 형식] { "items": [ { "path": string, "reason": string, "score": number } ] }
+  `.trim();
+
+  const data = await callOpenAI({
+    model: OPENAI_MODEL,
+    temperature: 0.2,
+    max_tokens: 500,
+    response_format: { type: "json_schema", json_schema: schemaDef(leafList).json_schema },
+    messages: [
+      { role: "system", content: verifierSys },
+      { role: "user", content: verifierUser },
+    ],
+  });
+
+  const raw = data?.choices?.[0]?.message?.content ?? "";
+  const arr = safeParseItems(raw);
+  const mapped = (Array.isArray(arr) ? arr : []).map((r) => ({
+    path: normalizeSpace(r?.path || ""),
+    reason: (r?.reason || "").toString().slice(0, 220),
+    score: typeof r?.score === "number" ? r.score : 0.66,
+  }));
+
+  return mapped.filter(r =>
+    r.path &&
+    depthOfPath(r.path) >= MIN_DEPTH &&
+    (typeof r.score === "number" ? r.score >= minScore : true)
+  ).slice(0, topN);
+}
+
+/** 앙상블 집계: 경로별 득표/평균 점수 → 재가중 스코어 */
+function aggregateEnsemble(buckets: Rec[][], allowSet: Set<string>, topN: number, minScore: number): Rec[] {
+  type Acc = { path: string; reasons: string[]; votes: number; scoreSum: number };
+  const acc: Record<string, Acc> = {};
+  for (const sample of buckets) {
+    for (const r of sample) {
+      const key = r.path;
+      if (!allowSet.has(key)) continue;
+      const slot = acc[key] || { path: key, reasons: [], votes: 0, scoreSum: 0 };
+      slot.votes += 1;
+      slot.scoreSum += r.score ?? 0.66;
+      if (r.reason) slot.reasons.push(r.reason);
+      acc[key] = slot;
+    }
+  }
+  const merged = Object.values(acc).map(a => {
+    const avg = a.scoreSum / Math.max(1, a.votes);
+    // 합의가 많을수록 보정 가중(최대 1.0까지 클램프)
+    const calibrated = Math.min(1, avg + Math.min(0.25, (a.votes - 1) * 0.12));
+    return {
+      path: a.path,
+      reason: uniqBy(a.reasons, (x) => x).join(" / ").slice(0, 220),
+      score: calibrated,
+      votes: a.votes,
+    } as Rec & { votes: number };
+  });
+
+  return merged
+    .filter(r => (r.score ?? 0) >= minScore)
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, topN)
+    .map(({ votes, ...rest }) => rest);
+}
+
+/** 메인 추천 로직 */
 async function recommendForSentence(
   en: string,
   ko: string | undefined,
-  allowSet: Set<string>,
   leafList: string[],
+  quality: "high" | "fast",
   topN: number,
   minScore: number
 ): Promise<Rec[]> {
+  const allowSet = new Set(leafList);
   const enNorm = normalizeSpace(en);
   const koNorm = ko ? normalizeSpace(ko) : undefined;
 
-  // 입력 품질 보정: 너무 짧으면 KO와 합쳐 힌트 강화
-  const useEN = enNorm;
   const tooShort = enNorm.split(/\s+/).length < MIN_WORDS;
+  const baseEN = tooShort && koNorm ? `${enNorm}. ${koNorm}` : enNorm;
 
   try {
-    // 1차: 보수적 (빈배열 허용, 낮은 temp)
-    let recs = await askOnce({
-      en: tooShort && koNorm ? `${useEN}. ${koNorm}` : useEN,
-      ko: koNorm,
-      pass: 1,
-      temperature: FIRST_TEMP,
-      leafList,
-      topN,
-    });
+    if (quality === "high") {
+      // 1) 앙상블 샘플 추론
+      const buckets: Rec[][] = [];
+      for (let i = 0; i < ENSEMBLE_SAMPLES; i++) {
+        const temp = ENSEMBLE_TEMPS[Math.min(i, ENSEMBLE_TEMPS.length - 1)];
+        const out = await askOnce({
+          en: baseEN,
+          ko: koNorm,
+          temperature: temp,
+          leafList,
+          topN,
+          minScore,
+        });
+        buckets.push(out);
+      }
 
-    // 경로/깊이/허용/스코어 필터 + 중복 제거
-    recs = uniq(
-      recs.filter(r =>
-        r.path &&
-        depthOfPath(r.path) >= MIN_DEPTH &&
-        allowSet.has(r.path) &&
-        (typeof r.score === "number" ? r.score >= minScore : true)
-      ),
-      (r) => r.path
-    ).slice(0, topN);
+      // 2) 집계(다수결+평균 점수 보정)
+      let combined = aggregateEnsemble(buckets, allowSet, topN * 2, Math.min(0, minScore - 0.05));
 
-    // 2차: 결과가 너무 적을 때 적극 재질의
-    if (recs.length <= RETRY_THRESHOLD) {
-      const more = await askOnce({
-        en: tooShort && koNorm ? `${useEN}. ${koNorm}` : useEN,
-        ko: koNorm,
-        pass: 2,
-        temperature: SECOND_TEMP,
-        leafList,
-        topN,
+      // 3) Verifier 패스로 엄밀 검증/정제
+      combined = await verifyAndRefine(enNorm, koNorm, leafList, combined, topN, minScore);
+
+      // 4) 부족하면 휴리스틱 보강
+      if (combined.length < DEFAULT_MIN_REC) {
+        const h = heuristic(enNorm, allowSet);
+        combined = uniqBy([...combined, ...h], (r) => r.path).slice(0, topN);
+      }
+
+      return combined;
+    } else {
+      // 빠른 경로(이전 로직 유사)
+      let recs = await askOnce({
+        en: baseEN, ko: koNorm,
+        temperature: 0.3, leafList, topN, minScore,
       });
-      const combined = uniq([...recs, ...more], (r) => r.path).filter(r =>
-        r.path &&
-        depthOfPath(r.path) >= MIN_DEPTH &&
-        allowSet.has(r.path) &&
-        (typeof r.score === "number" ? r.score >= minScore : true)
-      );
-      recs = combined.slice(0, topN);
+      if (recs.length < DEFAULT_MIN_REC) {
+        const more = await askOnce({
+          en: baseEN, ko: koNorm,
+          temperature: 0.6, leafList, topN, minScore,
+        });
+        recs = uniqBy([...recs, ...more], (r) => r.path).slice(0, topN);
+      }
+      if (recs.length < DEFAULT_MIN_REC) {
+        recs = uniqBy([...recs, ...heuristic(enNorm, allowSet)], (r) => r.path).slice(0, topN);
+      }
+      return recs;
     }
-
-    // 휴리스틱 백업 (여전히 부족하면)
-    if (recs.length < DEFAULT_MIN_REC) {
-      const h = heuristic(useEN, allowSet);
-      recs = uniq([...recs, ...h], (r) => r.path).slice(0, topN);
-    }
-    return recs;
   } catch {
-    // OpenAI 실패 시 휴리스틱만이라도
-    return heuristic(useEN, allowSet).slice(0, topN);
+    // 실패 시 휴리스틱만이라도
+    return heuristic(enNorm, new Set(leafList)).slice(0, topN);
   }
 }
 
@@ -371,29 +463,29 @@ export default async function handler(req: Request) {
       });
     }
 
-    // 동적 leaf 목록 지원: 클라이언트가 DB에서 is_leaf 경로를 주면 그걸 사용
-    // 없으면 기존 하드코드 화이트리스트 사용
+    // 동적 leaf 목록 (필수 권장)
     const leafPaths: string[] = Array.isArray(body?.leafPaths) && body.leafPaths.length
       ? body.leafPaths.map((s: any) => normalizeSpace(String(s)))
       : TAXONOMY_FALLBACK;
 
-    const topN = Number.isFinite(body?.topN) ? Math.min(Math.max(1, body.topN), DEFAULT_MAX_REC) : DEFAULT_MAX_REC;
-    const minScore = Number.isFinite(body?.minScore) ? Math.max(0, Math.min(1, body.minScore)) : DEFAULT_MIN_SCORE;
-
-    const allowSet = new Set(leafPaths);
+    const topN =
+      Number.isFinite(body?.topN) ? Math.min(Math.max(1, body.topN), DEFAULT_MAX_REC) : DEFAULT_MAX_REC;
+    const minScore =
+      Number.isFinite(body?.minScore) ? Math.max(0, Math.min(1, body.minScore)) : DEFAULT_MIN_SCORE;
+    const quality: "high" | "fast" = body?.quality === "high" ? "high" : "fast";
 
     const results = await Promise.all(
-      items.map(async (it) => {
-        const recs = await recommendForSentence(
+      items.map(async (it) => ({
+        pair_id: it.pair_id,
+        recs: await recommendForSentence(
           String(it.en || ""),
           it.ko ? String(it.ko) : undefined,
-          allowSet,
           leafPaths,
+          quality,
           topN,
           minScore
-        );
-        return { pair_id: it.pair_id, recs };
-      })
+        ),
+      }))
     );
 
     return new Response(JSON.stringify({ results }), {

@@ -35,11 +35,15 @@ function pathStringForDB(categoryId, metaObj) {
 }
 
 // 동일 출처(relative 경로) Vercel 함수 호출
-async function callRecommendAPI(pairs, leafPaths, { topN = 6, minScore = 0.5 } = {}) {
+async function callRecommendAPI(pairs, leafPaths, {
+  topN = 6,
+  minScore = 0.5,
+  quality = 'high', // 🔸 기본 high(앙상블+검증)
+} = {}) {
   const res = await fetch('/api/recommend_ai', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items: pairs, leafPaths, topN, minScore }),
+    body: JSON.stringify({ items: pairs, leafPaths, topN, minScore, quality }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -109,13 +113,13 @@ export default function CategoryRecommendPage() {
         // 3) Vercel 함수로 한 번에 추천 요청(배치)
         const payload = (pairRows ?? []).map((p) => ({
           pair_id: p.id,
-          en: p.en_sentence,
+          en: p.en_sentence || '',
           ko: p.ko_sentence ?? null,
         }));
 
         const apiResults =
           payload.length > 0
-            ? await callRecommendAPI(payload, leafPathList, { topN: 6, minScore: 0.5 })
+            ? await callRecommendAPI(payload, leafPathList, { topN: 6, minScore: 0.5, quality: 'high' })
             : [];
 
         // API 결과 → pair_id별 + DB 리프 매핑
@@ -145,12 +149,14 @@ export default function CategoryRecommendPage() {
               arr.push({
                 category_id: cid,
                 reason: it?.reason ?? '',
-                score: it?.score ?? null,
+                score: typeof it?.score === 'number' ? it.score : null,
                 support_count: it?.support_count ?? null,
                 example_sim: it?.example_sim ?? null,
               });
             }
           }
+          // 점수 높은 순으로 정렬
+          arr.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
           if (arr.length > 0) recMap[pid] = arr;
         }
 
@@ -382,7 +388,8 @@ export default function CategoryRecommendPage() {
           <div>
             <div className="ui-title">문장별 자동 분류 추천</div>
             <div className="ui-sub">
-              추천은 <b>최하위 분류만</b> 표시하며, <b>영문(en_sentence) 기준</b> + <b>누적 학습 데이터</b>로 계산됩니다. 각 추천에는 <b>한국어 이유</b>가 함께 제공됩니다.
+              추천은 <b>최하위 분류만</b> 표시하며, <b>영문(en_sentence) 기준</b> + <b>누적 학습 데이터</b>로 계산됩니다.
+              각 추천에는 <b>이유(reason)</b>와 <b>확신도(score)</b>가 함께 제공됩니다.
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -417,16 +424,21 @@ export default function CategoryRecommendPage() {
                 <div>
                   <span className="ui-sub">영문</span>
                   <div className="ui-card" style={{ background: '#f9fbff', marginTop: 6 }}>
-                    {p.en_sentence}
+                    {p.en_sentence || <i className="ui-sub">영문이 비어 있습니다</i>}
                   </div>
 
                   <div style={{ marginTop: 12 }}>
                     <span className="ui-sub">추천 분류 <small>(최하위만, 메모리 기반 + EN 기준)</small></span>
                     <div style={{ display: 'grid', gap: 8, marginTop: 6 }}>
-                      {leafOnly.length === 0 && <span className="ui-sub">추천이 없습니다.</span>}
+                      {leafOnly.length === 0 && (
+                        <span className="ui-sub">
+                          추천이 없습니다. <b>분류 검색</b>으로 직접 선택 후 저장하면, 다음부터 더 잘 학습됩니다.
+                        </span>
+                      )}
                       {leafOnly.map((r) => {
                         const cid = r.category_id;
                         const on = checked.has(cid);
+                        const scoreTxt = typeof r.score === 'number' ? ` · score ${r.score.toFixed(2)}` : '';
                         return (
                           <div key={cid} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                             <button
@@ -436,6 +448,7 @@ export default function CategoryRecommendPage() {
                               onClick={() => toggle(p.id, cid)}
                             >
                               {pathLabel(cid)}
+                              <span className="ui-sub" style={{ marginLeft: 6 }}>{scoreTxt}</span>
                             </button>
                             {r.reason && (
                               <div className="ui-sub" style={{ fontSize: 12, lineHeight: 1.4 }}>
@@ -476,7 +489,7 @@ export default function CategoryRecommendPage() {
                   <div>
                     <span className="ui-sub">한국어 해석</span>
                     <div className="ui-card" style={{ background: '#f9fbff', marginTop: 6 }}>
-                      {p.ko_sentence}
+                      {p.ko_sentence ?? <i className="ui-sub">(없음)</i>}
                     </div>
                   </div>
 
