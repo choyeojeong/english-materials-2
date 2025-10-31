@@ -22,7 +22,7 @@ function pathLabelLocal(categoryId, fallback, metaObj) {
   return names.join('→') || fallback || '(이름 없음)';
 }
 
-// 카테고리 ID로 'DB 경로 문자열( > 구분자 )' 생성 (학습 저장용)
+// 카테고리 ID로 'DB 경로 문자열( > 구분자 )' 생성 (학습 저장용/AI용 leaf 목록)
 function pathStringForDB(categoryId, metaObj) {
   if (!categoryId) return null;
   const names = [];
@@ -35,11 +35,11 @@ function pathStringForDB(categoryId, metaObj) {
 }
 
 // 동일 출처(relative 경로) Vercel 함수 호출
-async function callRecommendAPI(pairs) {
+async function callRecommendAPI(pairs, leafPaths, { topN = 6, minScore = 0.5 } = {}) {
   const res = await fetch('/api/recommend_ai', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items: pairs }),
+    body: JSON.stringify({ items: pairs, leafPaths, topN, minScore }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -101,6 +101,11 @@ export default function CategoryRecommendPage() {
         setCatMeta(allMeta);
         setLeafIds(allLeaves);
 
+        // 2-1) leafPaths(문자열) 구성 → Vercel 함수에 전달해 리프만 허용
+        const leafPathList = Array.from(allLeaves)
+          .map((cid) => pathStringForDB(cid, allMeta))
+          .filter(Boolean);
+
         // 3) Vercel 함수로 한 번에 추천 요청(배치)
         const payload = (pairRows ?? []).map((p) => ({
           pair_id: p.id,
@@ -108,7 +113,10 @@ export default function CategoryRecommendPage() {
           ko: p.ko_sentence ?? null,
         }));
 
-        const apiResults = payload.length > 0 ? await callRecommendAPI(payload) : [];
+        const apiResults =
+          payload.length > 0
+            ? await callRecommendAPI(payload, leafPathList, { topN: 6, minScore: 0.5 })
+            : [];
 
         // API 결과 → pair_id별 + DB 리프 매핑
         const recMap = {};
@@ -264,7 +272,7 @@ export default function CategoryRecommendPage() {
   const isOn = (pairId, categoryId) => {
     const set = selected[pairId];
     return set ? set.has(categoryId) : false;
-    };
+  };
 
   const toggle = (pairId, categoryId) => {
     if (!pairId || !categoryId) return;
