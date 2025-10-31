@@ -36,7 +36,6 @@ function pathStringForDB(categoryId, metaObj) {
 
 // 동일 출처(relative 경로) Vercel 함수 호출
 async function callRecommendAPI(pairs) {
-  // pairs: [{ pair_id, en, ko }]
   const res = await fetch('/api/recommend_ai', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -47,7 +46,6 @@ async function callRecommendAPI(pairs) {
     throw new Error(`[recommend_ai] HTTP ${res.status} ${text}`);
   }
   const json = await res.json();
-  // 결과 형태: { results: [{ pair_id, recs: [{ path, reason }] }, ...] }
   return Array.isArray(json?.results) ? json.results : [];
 }
 
@@ -66,7 +64,6 @@ export default function CategoryRecommendPage() {
   );
 
   const [pairs, setPairs] = useState([]);
-  // recs: { [pairId]: Array<{ category_id, reason?, score?, support_count?, example_sim? }> }
   const [recs, setRecs] = useState({});
   const [selected, setSelected] = useState({});
   const [catMeta, setCatMeta] = useState({});
@@ -74,8 +71,8 @@ export default function CategoryRecommendPage() {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState({});
   const [results, setResults] = useState({});
-  const [unmatched, setUnmatched] = useState({}); // 매핑 실패한 경로 문자열
-  const [nonLeaf, setNonLeaf] = useState({});     // 리프가 아닌 추천 경로
+  const [unmatched, setUnmatched] = useState({});
+  const [nonLeaf, setNonLeaf] = useState({});
 
   // 🔹 난이도 상태 + 디바운서
   const [difficultyMap, setDifficultyMap] = useState({});
@@ -113,7 +110,7 @@ export default function CategoryRecommendPage() {
 
         const apiResults = payload.length > 0 ? await callRecommendAPI(payload) : [];
 
-        // API 결과를 pair_id별로 정리하면서 문자열 경로를 DB 카테고리 id와 매핑
+        // API 결과 → pair_id별 + DB 리프 매핑
         const recMap = {};
         const rawUnmatched = {};
         const rawNonLeaf = {};
@@ -124,10 +121,10 @@ export default function CategoryRecommendPage() {
           const items = Array.isArray(r?.recs) ? r.recs : [];
           const arr = [];
           for (const it of items) {
-            const path = (it?.path ?? '').trim(); // "A > B > C"
+            const path = (it?.path ?? '').trim();
             if (!path) continue;
 
-            const cid = resolvePath(path); // 문자열 경로 → category_id
+            const cid = resolvePath(path);
             if (!cid) {
               (rawUnmatched[pid] ||= []).push(path);
               continue;
@@ -170,9 +167,7 @@ export default function CategoryRecommendPage() {
 
         // 5) 난이도 초기화
         const nextDiff = {};
-        for (const p of pairRows ?? []) {
-          nextDiff[p.id] = p.difficulty ?? '';
-        }
+        for (const p of pairRows ?? []) nextDiff[p.id] = p.difficulty ?? '';
 
         if (!alive) return;
         setPairs(pairRows ?? []);
@@ -200,7 +195,6 @@ export default function CategoryRecommendPage() {
       .select('id, name, parent_id');
     if (error) throw error;
 
-    // 이름 정규화(공백/괄호/구분자 오차 완화)
     const norm = (s = '') =>
       s
         .normalize('NFKC')
@@ -225,9 +219,7 @@ export default function CategoryRecommendPage() {
       const key = `${pid}|||${norm(n.name)}`;
       byParentName.set(key, n.id);
 
-      if (n.parent_id) {
-        childCount.set(n.parent_id, (childCount.get(n.parent_id) || 0) + 1);
-      }
+      if (n.parent_id) childCount.set(n.parent_id, (childCount.get(n.parent_id) || 0) + 1);
     }
 
     const leaves = new Set(Object.keys(meta).filter((id) => !childCount.has(id)));
@@ -269,6 +261,11 @@ export default function CategoryRecommendPage() {
 
   const pathLabel = (categoryId, fallback) => pathLabelLocal(categoryId, fallback, catMeta);
 
+  const isOn = (pairId, categoryId) => {
+    const set = selected[pairId];
+    return set ? set.has(categoryId) : false;
+  };
+
   const toggle = (pairId, categoryId) => {
     if (!pairId || !categoryId) return;
     setSelected((prev) => {
@@ -293,25 +290,19 @@ export default function CategoryRecommendPage() {
       .limit(20);
     if (error) return;
     const patch = {};
-    for (const n of data ?? [])
-      patch[n.id] = { name: n.name, parent_id: n.parent_id };
+    for (const n of data ?? []) patch[n.id] = { name: n.name, parent_id: n.parent_id };
     setCatMeta((p) => ({ ...p, ...patch }));
     setResults((r) => ({ ...r, [pairId]: data ?? [] }));
   };
 
+  // 🔁 검색 결과 버튼도 토글 동작으로 변경
   const addFromSearch = (pairId, cat) => {
     if (!pairId || !cat?.id) return;
-    setSelected((prev) => {
-      const next = { ...prev };
-      const set = new Set(next[pairId] ?? []);
-      set.add(cat.id);
-      next[pairId] = set;
-      return next;
-    });
     setCatMeta((prev) => ({
       ...prev,
       [cat.id]: { name: cat.name, parent_id: cat.parent_id ?? null },
     }));
+    toggle(pairId, cat.id); // 선택 ↔ 해제
   };
 
   const saveAll = async () => {
@@ -330,13 +321,9 @@ export default function CategoryRecommendPage() {
       // 2) 학습 데이터 누적 (선택된 분류를 텍스트 경로로 저장)
       await Promise.all(
         (pairs ?? []).map(async (p) => {
-          const chosenIds = Array.from(selected[p.id] ?? []).filter((cid) =>
-            leafIds.has(cid)
-          );
+          const chosenIds = Array.from(selected[p.id] ?? []).filter((cid) => leafIds.has(cid));
           if (chosenIds.length === 0) return;
-          const paths = chosenIds
-            .map((cid) => pathStringForDB(cid, catMeta))
-            .filter(Boolean);
+          const paths = chosenIds.map((cid) => pathStringForDB(cid, catMeta)).filter(Boolean);
           if (paths.length === 0) return;
 
           const { error } = await supabase.rpc('save_pair_feedback', {
@@ -344,7 +331,7 @@ export default function CategoryRecommendPage() {
             p_pair_id: p.id,
             p_en: p.en_sentence,
             p_ko: p.ko_sentence ?? null,
-            p_paths: paths, // ["품사 > 동사 > 구동사", ...] (leaf만)
+            p_paths: paths,
           });
           if (error) console.warn('[save_pair_feedback]', p.id, error.message);
         })
@@ -377,13 +364,7 @@ export default function CategoryRecommendPage() {
   }
 
   const difficultyLabel = (code) =>
-    code === 'easy'
-      ? '쉬움'
-      : code === 'normal'
-      ? '보통'
-      : code === 'hard'
-      ? '어려움'
-      : '(선택)';
+    code === 'easy' ? '쉬움' : code === 'normal' ? '보통' : code === 'hard' ? '어려움' : '(선택)';
 
   // --------------------------------------------------------------------
   return (
@@ -398,215 +379,174 @@ export default function CategoryRecommendPage() {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <DashboardButton />
-            <Link to="/category/done" className="ui-btn sm">
-              분류 완료 목록으로
-            </Link>
+            <Link to="/category/done" className="ui-btn sm">분류 완료 목록으로</Link>
           </div>
         </div>
 
         <div className="ui-card" style={{ marginBottom: 16 }}>
           <div className="ui-toolbar" style={{ justifyContent: 'flex-end' }}>
-            <button type="button" className="ui-btn primary" onClick={saveAll}>
-              저장
-            </button>
+            <button type="button" className="ui-btn primary" onClick={saveAll}>저장</button>
           </div>
         </div>
 
         {loading && <div className="ui-card">불러오는 중…</div>}
 
-        {!loading &&
-          pairs.map((p) => {
-            const checked = selected[p.id] ?? new Set();
-            const baseRec = (recs[p.id] ?? []).filter(
-              (v, i, a) => a.findIndex((x) => x.category_id === v.category_id) === i
-            );
-            const leafOnly = baseRec.filter((r) => leafIds.has(r.category_id));
+        {!loading && pairs.map((p) => {
+          const checked = selected[p.id] ?? new Set();
+          const baseRec = (recs[p.id] ?? []).filter(
+            (v, i, a) => a.findIndex((x) => x.category_id === v.category_id) === i
+          );
+          const leafOnly = baseRec.filter((r) => leafIds.has(r.category_id));
 
-            return (
-              <div key={p.id} className="ui-card" style={{ marginBottom: 20 }}>
-                <div
-                  className="ui-sub"
-                  style={{
-                    borderBottom: '1px dashed #e6edf7',
-                    paddingBottom: 6,
-                    marginBottom: 8,
-                  }}
-                >
-                  문장 ID: <b>{String(p.id).slice(0, 8)}</b>
-                </div>
+          return (
+            <div key={p.id} className="ui-card" style={{ marginBottom: 20 }}>
+              <div className="ui-sub" style={{ borderBottom: '1px dashed #e6edf7', paddingBottom: 6, marginBottom: 8 }}>
+                문장 ID: <b>{String(p.id).slice(0, 8)}</b>
+              </div>
 
-                <div
-                  className="pair-grid"
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: '1fr 1fr',
-                    gap: 16,
-                  }}
-                >
-                  {/* 좌측: 영문 + 추천 */}
-                  <div>
-                    <span className="ui-sub">영문</span>
-                    <div className="ui-card" style={{ background: '#f9fbff', marginTop: 6 }}>
-                      {p.en_sentence}
+              <div className="pair-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                {/* 좌측: 영문 + 추천 */}
+                <div>
+                  <span className="ui-sub">영문</span>
+                  <div className="ui-card" style={{ background: '#f9fbff', marginTop: 6 }}>
+                    {p.en_sentence}
+                  </div>
+
+                  <div style={{ marginTop: 12 }}>
+                    <span className="ui-sub">추천 분류 <small>(최하위만, 메모리 기반 + EN 기준)</small></span>
+                    <div style={{ display: 'grid', gap: 8, marginTop: 6 }}>
+                      {leafOnly.length === 0 && <span className="ui-sub">추천이 없습니다.</span>}
+                      {leafOnly.map((r) => {
+                        const cid = r.category_id;
+                        const on = checked.has(cid);
+                        return (
+                          <div key={cid} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            <button
+                              type="button"
+                              className={`ui-btn sm ${on ? 'primary' : ''}`}
+                              title={r.reason || ''}
+                              onClick={() => toggle(p.id, cid)}
+                            >
+                              {pathLabel(cid)}
+                            </button>
+                            {r.reason && (
+                              <div className="ui-sub" style={{ fontSize: 12, lineHeight: 1.4 }}>
+                                {r.reason}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
 
-                    <div style={{ marginTop: 12 }}>
-                      <span className="ui-sub">
-                        추천 분류 <small>(최하위만, 메모리 기반 + EN 기준)</small>
-                      </span>
-                      <div
-                        style={{
-                          display: 'grid',
-                          gap: 8,
-                          marginTop: 6,
-                        }}
-                      >
-                        {leafOnly.length === 0 && (
-                          <span className="ui-sub">추천이 없습니다.</span>
-                        )}
-                        {leafOnly.map((r) => {
-                          const cid = r.category_id;
-                          const on = checked.has(cid);
-                          return (
-                            <div key={cid} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                              <button
-                                type="button"
-                                className={`ui-btn sm ${on ? 'primary' : ''}`}
-                                title={r.reason || ''}
-                                onClick={() => toggle(p.id, cid)}
-                              >
-                                {pathLabel(cid)}
-                              </button>
-                              {r.reason && (
-                                <div className="ui-sub" style={{ fontSize: 12, lineHeight: 1.4 }}>
-                                  {r.reason}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
+                    {(nonLeaf[p.id] ?? []).length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <span className="ui-sub">리프가 아닌 추천(경로 확인 필요)</span>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+                          {(nonLeaf[p.id] ?? []).map((lbl, i) => (
+                            <span key={i} className="ui-badge" title="DB 트리에서 이 경로가 최하위가 아닙니다.">{lbl}</span>
+                          ))}
+                        </div>
                       </div>
+                    )}
 
-                      {(nonLeaf[p.id] ?? []).length > 0 && (
-                        <div style={{ marginTop: 8 }}>
-                          <span className="ui-sub">리프가 아닌 추천(경로 확인 필요)</span>
-                          <div
-                            style={{
-                              display: 'flex',
-                              flexWrap: 'wrap',
-                              gap: 8,
-                              marginTop: 4,
-                            }}
-                          >
-                            {(nonLeaf[p.id] ?? []).map((lbl, i) => (
-                              <span key={i} className="ui-badge" title="DB 트리에서 이 경로가 최하위가 아닙니다.">
-                                {lbl}
-                              </span>
-                            ))}
-                          </div>
+                    {(unmatched[p.id] ?? []).length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <span className="ui-sub">미등록/미매핑 경로</span>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+                          {(unmatched[p.id] ?? []).map((raw, idx) => (
+                            <span key={idx} className="ui-badge" title="DB 트리와 문자열이 달라 매핑 실패">{raw}</span>
+                          ))}
                         </div>
-                      )}
+                      </div>
+                    )}
+                  </div>
+                </div>
 
-                      {(unmatched[p.id] ?? []).length > 0 && (
-                        <div style={{ marginTop: 8 }}>
-                          <span className="ui-sub">미등록/미매핑 경로</span>
-                          <div
-                            style={{
-                              display: 'flex',
-                              flexWrap: 'wrap',
-                              gap: 8,
-                              marginTop: 4,
-                            }}
-                          >
-                            {(unmatched[p.id] ?? []).map((raw, idx) => (
-                              <span key={idx} className="ui-badge" title="DB 트리와 문자열이 달라 매핑 실패">
-                                {raw}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                {/* 우측: 한글 + 난이도 + 검색 */}
+                <div style={{ display: 'grid', gap: 10 }}>
+                  <div>
+                    <span className="ui-sub">한국어 해석</span>
+                    <div className="ui-card" style={{ background: '#f9fbff', marginTop: 6 }}>
+                      {p.ko_sentence}
                     </div>
                   </div>
 
-                  {/* 우측: 한글 + 난이도 + 검색 */}
-                  <div style={{ display: 'grid', gap: 10 }}>
-                    <div>
-                      <span className="ui-sub">한국어 해석</span>
-                      <div className="ui-card" style={{ background: '#f9fbff', marginTop: 6 }}>
-                        {p.ko_sentence}
-                      </div>
-                    </div>
+                  {/* 🔹 난이도 드롭다운 */}
+                  <div>
+                    <span className="ui-sub">난이도</span>
+                    <select
+                      className="ui-input"
+                      style={{ width: '100%', marginTop: 4 }}
+                      value={difficultyMap[p.id] ?? ''}
+                      onChange={(e) => onChangeDifficulty(p.id, e.target.value)}
+                    >
+                      <option value="">{difficultyLabel('')}</option>
+                      <option value="easy">쉬움</option>
+                      <option value="normal">보통</option>
+                      <option value="hard">어려움</option>
+                    </select>
+                  </div>
 
-                    {/* 🔹 난이도 드롭다운 */}
-                    <div>
-                      <span className="ui-sub">난이도</span>
-                      <select
-                        className="ui-input"
-                        style={{ width: '100%', marginTop: 4 }}
-                        value={difficultyMap[p.id] ?? ''}
-                        onChange={(e) => onChangeDifficulty(p.id, e.target.value)}
-                      >
-                        <option value="">{difficultyLabel('')}</option>
-                        <option value="easy">쉬움</option>
-                        <option value="normal">보통</option>
-                        <option value="hard">어려움</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <span className="ui-sub">분류 검색 (기존 분류 · 복수 선택 가능)</span>
-                      <input
-                        className="ui-input"
-                        placeholder="예: 품사, 보통명사"
-                        value={query[p.id] ?? ''}
-                        onChange={(e) => searchCats(p.id, e.target.value)}
-                      />
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
-                        {(results[p.id] ?? []).map((cat) => (
+                  {/* 🔎 분류 검색 (토글) */}
+                  <div>
+                    <span className="ui-sub">분류 검색 (기존 분류 · 복수 선택 가능)</span>
+                    <input
+                      className="ui-input"
+                      placeholder="예: 품사, 보통명사"
+                      value={query[p.id] ?? ''}
+                      onChange={(e) => searchCats(p.id, e.target.value)}
+                    />
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                      {(results[p.id] ?? []).map((cat) => {
+                        const on = isOn(p.id, cat.id);
+                        return (
                           <button
                             type="button"
                             key={cat.id}
-                            className="ui-btn sm"
+                            className={`ui-btn sm ${on ? 'primary' : ''}`}
                             onClick={() => addFromSearch(p.id, cat)}
                           >
                             {pathLabel(cat.id, cat.name)}
                           </button>
-                        ))}
-                      </div>
+                        );
+                      })}
                     </div>
+                  </div>
 
-                    <div>
-                      <span className="ui-sub">현재 선택</span>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
-                        {Array.from(checked).length === 0 && <span className="ui-sub">선택된 분류가 없습니다.</span>}
-                        {Array.from(checked).map((cid) => (
-                          <span key={cid} className="ui-badge">
-                            {pathLabel(cid)}
-                          </span>
-                        ))}
-                      </div>
+                  {/* ✅ 현재 선택 (클릭 시 해제) */}
+                  <div>
+                    <span className="ui-sub">현재 선택</span>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                      {Array.from(checked).length === 0 && <span className="ui-sub">선택된 분류가 없습니다.</span>}
+                      {Array.from(checked).map((cid) => (
+                        <button
+                          key={cid}
+                          type="button"
+                          className="ui-badge"
+                          title="클릭하면 해제됩니다"
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => toggle(p.id, cid)}
+                        >
+                          {pathLabel(cid)}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </div>
               </div>
-            );
-          })}
+            </div>
+          );
+        })}
 
         <div className="ui-toolbar" style={{ justifyContent: 'space-between' }}>
-          <button type="button" className="ui-btn" onClick={() => nav(-1)}>
-            검수 편집으로 돌아가기
-          </button>
-          <button type="button" className="ui-btn primary" onClick={saveAll}>
-            저장
-          </button>
+          <button type="button" className="ui-btn" onClick={() => nav(-1)}>검수 편집으로 돌아가기</button>
+          <button type="button" className="ui-btn primary" onClick={saveAll}>저장</button>
         </div>
 
         <style>{`
           @media (max-width: 800px) {
-            .pair-grid {
-              grid-template-columns: 1fr !important;
-            }
+            .pair-grid { grid-template-columns: 1fr !important; }
           }
         `}</style>
       </div>
