@@ -1,17 +1,18 @@
-import { serve } from "std/http/server";
+// api/recommend_ai.ts
+export const config = {
+  runtime: "edge",
+};
 
-/** 입력/출력 타입 */
 type ReqItem = { pair_id: number; en: string; ko?: string };
 type Rec = { path: string; reason?: string };
 
-/** ✅ 공통 CORS */
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-/** 📚 화이트리스트(leaf 전용 경로들) — 사용자가 지정한 목록으로 제한 */
+/** 📚 화이트리스트(leaf 전용 경로들) */
 const TAXONOMY: string[] = [
   "품사 > 대명사 > 재귀대명사",
   "품사 > 대명사 > 부정대명사",
@@ -75,19 +76,12 @@ const TAXONOMY: string[] = [
   "특수 구문 > 생략 구문",
 ];
 
-/** 🔧 파라미터 */
 const MIN_REC = 3;
 const MAX_REC = 6;
-// Edge Functions 기본 타임아웃(10초) 고려 → 9초로
-const OPENAI_TIMEOUT_MS = 9_000;
 const OPENAI_MODEL = "gpt-4o-mini";
+const OPENAI_TIMEOUT_MS = 1000 * 12;
+const RETRY_THRESHOLD = 2;
 
-// 2차 재시도 설정
-const RETRY_ON_FEW = true;
-const RETRY_THRESHOLD = 2;      // 1~2개만 나오면 재시도
-const RETRY_TEMPERATURE = 0.9;  // 두 번째 시도는 더 다양하게
-
-/** 🧠 시스템 프롬프트(강화) */
 const SYS_PROMPT = `
 너는 한국 중·고등 영어 교육과정 분류 보조 교사다.
 
@@ -107,7 +101,6 @@ const SYS_PROMPT = `
 ${TAXONOMY.map((p) => `- ${p}`).join("\n")}
 `.trim();
 
-/** 🎯 few-shot */
 const FEW_SHOT: Array<{ en: string; ko: string; paths: string[] }> = [
   {
     en: "I wish I could fly.",
@@ -129,32 +122,9 @@ const FEW_SHOT: Array<{ en: string; ko: string; paths: string[] }> = [
   },
 ];
 
-/** ---------- 타입 가드 & 유틸 ---------- */
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
-}
-function isRec(v: unknown): v is Rec {
-  return (
-    isRecord(v) &&
-    typeof (v as any).path === "string" &&
-    (((v as any).reason === undefined) || typeof (v as any).reason === "string")
-  );
-}
-function isRecArray(v: unknown): v is Rec[] {
-  return Array.isArray(v) && v.every(isRec);
-}
-function hasItemsArray(v: unknown): v is { items: Rec[] } {
-  return isRecord(v) && Array.isArray((v as any).items) && (v as any).items.every(isRec);
-}
+const allow = new Set(TAXONOMY);
 
-/** OpenAI 최소 응답 타입 */
-interface ChatMessage { content?: string }
-interface ChatChoice { message?: ChatMessage }
-interface ChatCompletion { choices?: ChatChoice[] }
-
-/** 🧹 화이트리스트/중복/길이 필터 */
 function filterToAllowed(items: Rec[], max = MAX_REC): Rec[] {
-  const allow = new Set(TAXONOMY);
   const out: Rec[] = [];
   for (const it of items ?? []) {
     const path = String(it?.path ?? "").replace(/\s+/g, " ").trim();
@@ -167,7 +137,6 @@ function filterToAllowed(items: Rec[], max = MAX_REC): Rec[] {
   return out;
 }
 
-/** 👤 유저 메시지 구성 */
 function buildUserContent(en: string, ko?: string, pass: 1 | 2 = 1) {
   const lines = [
     `EN 우선으로 판단하고, KO는 보조적으로만 사용.`,
@@ -193,56 +162,48 @@ function buildUserContent(en: string, ko?: string, pass: 1 | 2 = 1) {
   return `${lines.join("\n")}\n\n${rows}\n\n${shot}`;
 }
 
-/** 🧩 JSON 파서(코드블록/문장 중 포함 케이스까지 긁어오기) */
 function safeParseArrayOrItems(jsonText: string): Rec[] {
   try {
     const obj: unknown = JSON.parse(jsonText);
-    if (isRecArray(obj)) return obj;
-    if (hasItemsArray(obj)) return (obj as { items: Rec[] }).items;
-  } catch { /* ignore */ }
+    if (Array.isArray(obj) && obj.every(o => o && typeof o.path === "string")) return obj as Rec[];
+    if (typeof obj === "object" && obj && Array.isArray((obj as any).items)) return (obj as any).items as Rec[];
+  } catch {}
   const m =
     jsonText.match(/```json\s*([\s\S]*?)\s*```/) ??
     jsonText.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
   if (m) {
     try {
       const obj2: unknown = JSON.parse(m[1]);
-      if (isRecArray(obj2)) return obj2;
-      if (hasItemsArray(obj2)) return (obj2 as { items: Rec[] }).items;
-    } catch { /* ignore */ }
+      if (Array.isArray(obj2) && obj2.every(o => o && typeof (o as any).path === "string")) return obj2 as Rec[];
+      if (typeof obj2 === "object" && obj2 && Array.isArray((obj2 as any).items)) return (obj2 as any).items as Rec[];
+    } catch {}
   }
   return [];
 }
 
-/** ⏱️ OpenAI 호출 with timeout + 상세 오류 */
-async function callOpenAI(payload: Record<string, unknown>, timeoutMs = OPENAI_TIMEOUT_MS): Promise<unknown> {
-  const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
-  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+async function callOpenAI(payload: Record<string, unknown>, timeoutMs = OPENAI_TIMEOUT_MS): Promise<any> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY not set on Vercel");
 
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
-
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
       signal: ac.signal,
     });
-    if (!r.ok) {
-      const body = await r.text();
-      throw new Error(`OpenAI HTTP ${r.status}: ${body}`);
-    }
-    const json: unknown = await r.json();
-    return json;
+    if (!r.ok) throw new Error(`OpenAI HTTP ${r.status}: ${await r.text()}`);
+    return await r.json();
   } finally {
     clearTimeout(t);
   }
 }
 
-/** 🔧 스키마(빈 배열 허용, enum = TAXONOMY 유지) */
 function schemaDef() {
   return {
     type: "json_schema",
@@ -253,7 +214,7 @@ function schemaDef() {
         properties: {
           items: {
             type: "array",
-            maxItems: MAX_REC,        // ✅ 빈 배열 허용 (minItems 없음)
+            maxItems: MAX_REC, // 빈 배열 허용
             items: {
               type: "object",
               required: ["path", "reason"],
@@ -273,8 +234,7 @@ function schemaDef() {
   } as const;
 }
 
-/** 🧪 OpenAI 1차 호출 */
-async function askOpenAI_once(en: string, ko: string | undefined, pass: 1 | 2, temperature: number): Promise<Rec[]> {
+async function askOnce(en: string, ko: string | undefined, pass: 1 | 2, temperature: number): Promise<Rec[]> {
   const data = await callOpenAI({
     model: OPENAI_MODEL,
     temperature,
@@ -284,91 +244,76 @@ async function askOpenAI_once(en: string, ko: string | undefined, pass: 1 | 2, t
       { role: "system", content: SYS_PROMPT },
       { role: "user", content: buildUserContent(en, ko, pass) },
     ],
-  }, OPENAI_TIMEOUT_MS);
+  });
 
-  const cc = data as ChatCompletion;
-  const text = cc.choices?.[0]?.message?.content ?? "";
+  const text = data?.choices?.[0]?.message?.content ?? "";
   const arr = safeParseArrayOrItems(text);
   return filterToAllowed(arr);
 }
 
-/** 🧪 OpenAI 질의: 1차 결과가 적으면 2차 재시도 → 그래도 적으면 휴리스틱 보강 */
-async function askOpenAI(en: string, ko?: string): Promise<Rec[]> {
+function heuristic(en: string): Rec[] {
+  const s = (en || "").toLowerCase();
+  const picks: string[] = [];
+  if (s.includes("i wish")) picks.push("특수 구문 > 가정법 구문 > I wish 가정법");
+  if (/\b(if|unless|provided|as long as)\b/.test(s)) picks.push("절(Clause) > 부사절 > 조건의 부사절");
+  if (/\b(because|since|as)\b/.test(s)) picks.push("절(Clause) > 부사절 > 이유의 부사절");
+  if (/\b(when|while|after|before|until|once)\b/.test(s)) picks.push("절(Clause) > 부사절 > 시간의 부사절");
+  if (/\b(though|although|even though|even if|whereas)\b/.test(s)) picks.push("절(Clause) > 부사절 > 양보의 부사절");
+  if (/\bthat\b/.test(s)) picks.push("절(Clause) > 명사절 > that절");
+  if (/\b(who|which|that)\b/.test(s)) picks.push("절(Clause) > 형용사절 > 관계대명사절");
+  if (/\b(where|in which|at which|on which|to which)\b/.test(s)) picks.push("절(Clause) > 형용사절 > 관계부사절");
+  if (/\bto\s+\w+/.test(s)) picks.push("구(Phrase) > to부정사구 > 부사적 용법");
+  if (/\b(more|most|less|least|than|as\b.*\bas)\b/.test(s)) picks.push("특수 구문 > 비교급 구문");
+
+  const uniq = Array.from(new Set(picks)).filter(p => allow.has(p)).slice(0, MAX_REC);
+  return uniq.map(p => ({ path: p, reason: "전형적 패턴(휴리스틱)" }));
+}
+
+async function recommendForSentence(en: string, ko?: string): Promise<Rec[]> {
   try {
-    // 1차: 다양도 ↑ (0.7)
-    let recs = await askOpenAI_once(en, ko, 1, 0.7);
+    // 1차: 보수적 (빈 배열 허용)
+    let recs = await askOnce(en, ko, 1, 0.7);
 
-    // 2차: 결과가 너무 적으면 한 번 더 강하게 요청
-    if (RETRY_ON_FEW && recs.length <= RETRY_THRESHOLD) {
-      const recs2 = await askOpenAI_once(en, ko, 2, RETRY_TEMPERATURE);
-      // 1,2차 합치고 중복제거 + MAX_REC 제한
-      recs = filterToAllowed([...recs, ...recs2]);
-    }
-
-    // 휴리스틱 보강: 그래도 너무 적으면 전형적 패턴으로 채움
-    if (recs.length < MIN_REC) {
-      const more = heuristicFromSentence(en);
+    // 2차: 너무 적으면 적극적으로 재요청
+    if (recs.length <= RETRY_THRESHOLD) {
+      const more = await askOnce(en, ko, 2, 0.9);
       recs = filterToAllowed([...recs, ...more]);
     }
 
+    // 휴리스틱 보강
+    if (recs.length < MIN_REC) {
+      recs = filterToAllowed([...recs, ...heuristic(en)]);
+    }
     return recs;
   } catch (e) {
-    console.error("[recommend_ai] OpenAI call failed:", e instanceof Error ? e.message : String(e));
-    // 호출 자체 실패 시 휴리스틱만 사용
-    return heuristicFromSentence(en);
+    // OpenAI 실패 시에도 최소한의 결과 보장
+    return heuristic(en);
   }
 }
 
-/** 🔦 휴리스틱(화이트리스트 범위 내에서만) */
-function heuristicFromSentence(en: string): Rec[] {
-  const heuristics: string[] = [];
-  const s = (en || "").toLowerCase();
-
-  if (s.includes("i wish")) heuristics.push("특수 구문 > 가정법 구문 > I wish 가정법");
-  if (/\b(if|unless|provided|as long as)\b/.test(s)) heuristics.push("절(Clause) > 부사절 > 조건의 부사절");
-  if (/\bthat\b/.test(s)) heuristics.push("절(Clause) > 명사절 > that절");
-  if (/\bto\s+\w+/.test(s)) heuristics.push("구(Phrase) > to부정사구 > 부사적 용법");
-  if (/\b(who|which|that)\b/.test(s)) heuristics.push("절(Clause) > 형용사절 > 관계대명사절");
-  if (/\b(more|most|less|least|than|as\b.*\bas)\b/.test(s)) heuristics.push("특수 구문 > 비교급 구문");
-
-  const uniq = Array.from(new Set(heuristics)).filter((p) => TAXONOMY.includes(p)).slice(0, MAX_REC);
-  return uniq.map((p) => ({ path: p, reason: "전형적 패턴(휴리스틱)" }));
-}
-
-/** ▶️ HTTP 핸들러 */
-serve(async (req: Request) => {
+export default async function handler(req: Request) {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
   if (req.method !== "POST") {
     return new Response("POST only", { status: 405, headers: corsHeaders });
   }
-
   try {
-    const parsed = (await req.json()) as unknown;
-    const items = (isRecord(parsed) && Array.isArray((parsed as any).items) ? (parsed as any).items : []) as ReqItem[];
-
-    if (!Array.isArray(items) || items.length === 0) {
-      return new Response(JSON.stringify({ results: [] }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const results: { pair_id: number; recs: Rec[] }[] = [];
-    for (const it of items) {
-      const recs = await askOpenAI(it.en, it.ko);
-      results.push({ pair_id: it.pair_id, recs });
-    }
-
+    const body = await req.json();
+    const items: ReqItem[] = Array.isArray(body?.items) ? body.items : [];
+    const results = await Promise.all(
+      items.map(async (it) => ({
+        pair_id: it.pair_id,
+        recs: await recommendForSentence(it.en, it.ko),
+      })),
+    );
     return new Response(JSON.stringify({ results }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error("[recommend_ai] handler error:", msg);
-    return new Response(JSON.stringify({ error: msg }), {
+  } catch (e: any) {
+    return new Response(JSON.stringify({ error: e?.message || String(e) }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
-});
+}
