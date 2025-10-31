@@ -2,7 +2,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { supabase } from '../utils/supabaseClient';
-// import { recommendForPairs } from '../utils/ai'; // ❌ 사용 안 함 (메모리 추천으로 교체)
 import DashboardButton from '../components/DashboardButton';
 import '../styles/ui.css';
 
@@ -33,6 +32,23 @@ function pathStringForDB(categoryId, metaObj) {
     cur = metaObj[cur].parent_id;
   }
   return names.length ? names.join(' > ') : null;
+}
+
+// 동일 출처(relative 경로) Vercel 함수 호출
+async function callRecommendAPI(pairs) {
+  // pairs: [{ pair_id, en, ko }]
+  const res = await fetch('/api/recommend_ai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: pairs }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`[recommend_ai] HTTP ${res.status} ${text}`);
+  }
+  const json = await res.json();
+  // 결과 형태: { results: [{ pair_id, recs: [{ path, reason }] }, ...] }
+  return Array.isArray(json?.results) ? json.results : [];
 }
 
 export default function CategoryRecommendPage() {
@@ -88,50 +104,50 @@ export default function CategoryRecommendPage() {
         setCatMeta(allMeta);
         setLeafIds(allLeaves);
 
-        // 3) 메모리 기반 추천 호출 (문장별 RPC)
+        // 3) Vercel 함수로 한 번에 추천 요청(배치)
+        const payload = (pairRows ?? []).map((p) => ({
+          pair_id: p.id,
+          en: p.en_sentence,
+          ko: p.ko_sentence ?? null,
+        }));
+
+        const apiResults = payload.length > 0 ? await callRecommendAPI(payload) : [];
+
+        // API 결과를 pair_id별로 정리하면서 문자열 경로를 DB 카테고리 id와 매핑
         const recMap = {};
         const rawUnmatched = {};
         const rawNonLeaf = {};
 
-        await Promise.all(
-          (pairRows ?? []).map(async (p) => {
-            const { data, error } = await supabase.rpc('memory_recommend_for_text', {
-              p_en: p.en_sentence,
-              p_ko: p.ko_sentence ?? null,
-              p_top_n: 6,
-            });
-            if (error) {
-              console.warn('[memory_recommend_for_text] error', error);
-              return;
-            }
-            const items = Array.isArray(data) ? data : [];
-            const arr = [];
-            for (const it of items) {
-              const path = (it?.path ?? '').trim(); // "A > B > C"
-              if (!path) continue;
+        for (const r of apiResults) {
+          const pid = r?.pair_id;
+          if (!pid) continue;
+          const items = Array.isArray(r?.recs) ? r.recs : [];
+          const arr = [];
+          for (const it of items) {
+            const path = (it?.path ?? '').trim(); // "A > B > C"
+            if (!path) continue;
 
-              const cid = resolvePath(path); // 문자열 경로 → category_id
-              if (!cid) {
-                (rawUnmatched[p.id] ||= []).push(path);
-                continue;
-              }
-              if (!allLeaves.has(cid)) {
-                (rawNonLeaf[p.id] ||= []).push(pathLabelLocal(cid, path, allMeta));
-                continue;
-              }
-              if (arr.findIndex((x) => x.category_id === cid) === -1) {
-                arr.push({
-                  category_id: cid,
-                  reason: it?.reason ?? '',
-                  score: it?.score ?? null,
-                  support_count: it?.support_count ?? null,
-                  example_sim: it?.example_sim ?? null,
-                });
-              }
+            const cid = resolvePath(path); // 문자열 경로 → category_id
+            if (!cid) {
+              (rawUnmatched[pid] ||= []).push(path);
+              continue;
             }
-            if (arr.length > 0) recMap[p.id] = arr;
-          })
-        );
+            if (!allLeaves.has(cid)) {
+              (rawNonLeaf[pid] ||= []).push(pathLabelLocal(cid, path, allMeta));
+              continue;
+            }
+            if (arr.findIndex((x) => x.category_id === cid) === -1) {
+              arr.push({
+                category_id: cid,
+                reason: it?.reason ?? '',
+                score: it?.score ?? null,
+                support_count: it?.support_count ?? null,
+                example_sim: it?.example_sim ?? null,
+              });
+            }
+          }
+          if (arr.length > 0) recMap[pid] = arr;
+        }
 
         // 4) 기존 선택값 불러오기
         const pairIds = (pairRows ?? []).map((p) => p.id).filter(Boolean);
