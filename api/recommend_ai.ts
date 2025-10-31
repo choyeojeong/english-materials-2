@@ -1,3 +1,4 @@
+// /api/recommend_ai.ts
 export const config = { runtime: "edge" };
 
 /** ====== 타입 ====== */
@@ -5,7 +6,7 @@ type ReqItem = { pair_id: number | string; en: string; ko?: string };
 type Rec = { path: string; reason?: string; score?: number };
 
 /** ====== CORS ====== */
-const corsHeaders = {
+const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -87,8 +88,8 @@ const DEFAULT_MAX_REC = 6;
 const DEFAULT_MIN_SCORE = 0.0;
 
 /** 앙상블 샘플 파라미터 */
-const ENSEMBLE_SAMPLES = 3;            // 몇 번 뽑아 합의?
-const ENSEMBLE_TEMPS = [0.2, 0.4, 0.7]; // 보수→중간→살짝 다양성
+const ENSEMBLE_SAMPLES = 3;
+const ENSEMBLE_TEMPS = [0.2, 0.4, 0.7];
 
 /** ====== 프롬프트 ====== */
 const SYS_PROMPT = `
@@ -99,7 +100,7 @@ const SYS_PROMPT = `
 - 불확실하면 빈 배열 허용(단, 후속 검증 단계에서 보완될 수 있음)
 `.trim();
 
-/** few-shot (간단 예시) */
+/** few-shot */
 const FEW_SHOT: Array<{ en: string; ko: string; items: Rec[] }> = [
   {
     en: "I wish I could fly.",
@@ -174,8 +175,8 @@ function schemaDef(leafList: string[]) {
 /** 안전 파서 */
 function safeParseItems(jsonText: string): Rec[] {
   try {
-    const obj = JSON.parse(jsonText);
-    if (obj && Array.isArray((obj as any).items)) return (obj as any).items;
+    const obj = JSON.parse(jsonText as string);
+    if (obj && Array.isArray((obj as any).items)) return (obj as any).items as Rec[];
   } catch {}
   const m =
     jsonText.match(/```json\s*([\s\S]*?)\s*```/) ??
@@ -183,7 +184,7 @@ function safeParseItems(jsonText: string): Rec[] {
   if (m) {
     try {
       const obj2 = JSON.parse(m[1]);
-      if (obj2 && Array.isArray((obj2 as any).items)) return (obj2 as any).items;
+      if (obj2 && Array.isArray((obj2 as any).items)) return (obj2 as any).items as Rec[];
     } catch {}
   }
   return [];
@@ -243,7 +244,7 @@ async function askOnce(opts: {
   const hints = [
     `EN을 우선으로 판단하고 KO는 보조적으로만 사용.`,
     `권장 개수: ${DEFAULT_MIN_REC}~${topN}개.`,
-    `경로 구분자는 " > " (양쪽 공백)`,
+    `경로 구분자는 " > " (양쪽 공백).`,
     `화이트리스트(leaf)에 **정확히 일치**하는 경로만.`,
     `중복/유사 포인트는 피하고 다양성을 확보.`,
     `score는 0~1 실수로 추정치라도 반드시 포함.`,
@@ -280,9 +281,9 @@ ${shot}
   const raw = data?.choices?.[0]?.message?.content ?? "";
   const arr = safeParseItems(raw);
   const mapped = (Array.isArray(arr) ? arr : []).map((r) => ({
-    path: normalizeSpace(r?.path || ""),
-    reason: (r?.reason || "").toString().slice(0, 220),
-    score: typeof r?.score === "number" ? r.score : 0.66,
+    path: normalizeSpace((r as Rec)?.path || ""),
+    reason: ((r as Rec)?.reason || "").toString().slice(0, 220),
+    score: typeof (r as Rec)?.score === "number" ? (r as Rec).score : 0.66,
   }));
 
   // 1차 필터: 형식/깊이/스코어
@@ -293,8 +294,15 @@ ${shot}
   ).slice(0, topN);
 }
 
-/** Verifier 패스: 1차 합본을 검증/정제 */
-async function verifyAndRefine(en: string, ko: string | undefined, leafList: string[], candidates: Rec[], topN: number, minScore: number): Promise<Rec[]> {
+/** Verifier 패스: 후보를 검증/정제 */
+async function verifyAndRefine(
+  en: string,
+  ko: string | undefined,
+  leafList: string[],
+  candidates: Rec[],
+  topN: number,
+  minScore: number
+): Promise<Rec[]> {
   const verifierSys = `너는 문장 분류 결과를 검증하는 교사다. 주어진 후보들에서 규칙 위반(리프가 아님, 중복, 논리 불충분)을 제거하고 최적의 상위 ${topN}개를 JSON으로만 반환하라.`;
   const verifierUser = `
 [문장]
@@ -333,9 +341,9 @@ ${JSON.stringify({ items: candidates }, null, 2)}
   const raw = data?.choices?.[0]?.message?.content ?? "";
   const arr = safeParseItems(raw);
   const mapped = (Array.isArray(arr) ? arr : []).map((r) => ({
-    path: normalizeSpace(r?.path || ""),
-    reason: (r?.reason || "").toString().slice(0, 220),
-    score: typeof r?.score === "number" ? r.score : 0.66,
+    path: normalizeSpace((r as Rec)?.path || ""),
+    reason: ((r as Rec)?.reason || "").toString().slice(0, 220),
+    score: typeof (r as Rec)?.score === "number" ? (r as Rec).score : 0.66,
   }));
 
   return mapped.filter(r =>
@@ -345,8 +353,13 @@ ${JSON.stringify({ items: candidates }, null, 2)}
   ).slice(0, topN);
 }
 
-/** 앙상블 집계: 경로별 득표/평균 점수 → 재가중 스코어 */
-function aggregateEnsemble(buckets: Rec[][], allowSet: Set<string>, topN: number, minScore: number): Rec[] {
+/** 앙상블 집계 */
+function aggregateEnsemble(
+  buckets: Rec[][],
+  allowSet: Set<string>,
+  topN: number,
+  minScore: number
+): Rec[] {
   type Acc = { path: string; reasons: string[]; votes: number; scoreSum: number };
   const acc: Record<string, Acc> = {};
   for (const sample of buckets) {
@@ -362,7 +375,6 @@ function aggregateEnsemble(buckets: Rec[][], allowSet: Set<string>, topN: number
   }
   const merged = Object.values(acc).map(a => {
     const avg = a.scoreSum / Math.max(1, a.votes);
-    // 합의가 많을수록 보정 가중(최대 1.0까지 클램프)
     const calibrated = Math.min(1, avg + Math.min(0.25, (a.votes - 1) * 0.12));
     return {
       path: a.path,
@@ -397,44 +409,33 @@ async function recommendForSentence(
 
   try {
     if (quality === "high") {
-      // 1) 앙상블 샘플 추론
+      // 1) 앙상블
       const buckets: Rec[][] = [];
       for (let i = 0; i < ENSEMBLE_SAMPLES; i++) {
         const temp = ENSEMBLE_TEMPS[Math.min(i, ENSEMBLE_TEMPS.length - 1)];
         const out = await askOnce({
-          en: baseEN,
-          ko: koNorm,
-          temperature: temp,
-          leafList,
-          topN,
-          minScore,
+          en: baseEN, ko: koNorm, temperature: temp, leafList, topN, minScore,
         });
         buckets.push(out);
       }
-
-      // 2) 집계(다수결+평균 점수 보정)
+      // 2) 집계
       let combined = aggregateEnsemble(buckets, allowSet, topN * 2, Math.min(0, minScore - 0.05));
-
-      // 3) Verifier 패스로 엄밀 검증/정제
+      // 3) 검증
       combined = await verifyAndRefine(enNorm, koNorm, leafList, combined, topN, minScore);
-
       // 4) 부족하면 휴리스틱 보강
       if (combined.length < DEFAULT_MIN_REC) {
         const h = heuristic(enNorm, allowSet);
         combined = uniqBy([...combined, ...h], (r) => r.path).slice(0, topN);
       }
-
       return combined;
     } else {
-      // 빠른 경로(이전 로직 유사)
+      // 빠른 경로
       let recs = await askOnce({
-        en: baseEN, ko: koNorm,
-        temperature: 0.3, leafList, topN, minScore,
+        en: baseEN, ko: koNorm, temperature: 0.3, leafList, topN, minScore,
       });
       if (recs.length < DEFAULT_MIN_REC) {
         const more = await askOnce({
-          en: baseEN, ko: koNorm,
-          temperature: 0.6, leafList, topN, minScore,
+          en: baseEN, ko: koNorm, temperature: 0.6, leafList, topN, minScore,
         });
         recs = uniqBy([...recs, ...more], (r) => r.path).slice(0, topN);
       }
@@ -444,9 +445,33 @@ async function recommendForSentence(
       return recs;
     }
   } catch {
-    // 실패 시 휴리스틱만이라도
     return heuristic(enNorm, new Set(leafList)).slice(0, topN);
   }
+}
+
+/** ====== 안전 파싱 유틸 ====== */
+function isNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+function readNumberOr<T extends number>(v: unknown, fallback: T): number {
+  return isNumber(v) ? v : fallback;
+}
+function readStringArray(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const out = v.map(x => normalizeSpace(String(x))).filter(Boolean);
+  return out.length ? out : null;
+}
+function readItems(v: unknown): ReqItem[] {
+  if (!Array.isArray(v)) return [];
+  const out: ReqItem[] = [];
+  for (const it of v) {
+    const en = it?.en;
+    const pid = it?.pair_id;
+    if (typeof en === "string" && (typeof pid === "string" || typeof pid === "number")) {
+      out.push({ pair_id: pid, en, ko: typeof it?.ko === "string" ? it.ko : undefined });
+    }
+  }
+  return out;
 }
 
 /** ====== 핸들러 ====== */
@@ -455,24 +480,26 @@ export default async function handler(req: Request) {
   if (req.method !== "POST") return new Response("POST only", { status: 405, headers: corsHeaders });
 
   try {
-    const body = await req.json();
-    const items: ReqItem[] = Array.isArray(body?.items) ? body.items : [];
+    const body = (await req.json()) as unknown;
+
+    const items = readItems((body as any)?.items);
     if (!items.length) {
       return new Response(JSON.stringify({ results: [] }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // 동적 leaf 목록 (필수 권장)
-    const leafPaths: string[] = Array.isArray(body?.leafPaths) && body.leafPaths.length
-      ? body.leafPaths.map((s: any) => normalizeSpace(String(s)))
-      : TAXONOMY_FALLBACK;
+    const leafPaths =
+      readStringArray((body as any)?.leafPaths) ?? TAXONOMY_FALLBACK;
 
-    const topN =
-      Number.isFinite(body?.topN) ? Math.min(Math.max(1, body.topN), DEFAULT_MAX_REC) : DEFAULT_MAX_REC;
-    const minScore =
-      Number.isFinite(body?.minScore) ? Math.max(0, Math.min(1, body.minScore)) : DEFAULT_MIN_SCORE;
-    const quality: "high" | "fast" = body?.quality === "high" ? "high" : "fast";
+    const topNRaw = readNumberOr((body as any)?.topN, DEFAULT_MAX_REC);
+    const topN = Math.min(Math.max(1, Math.floor(topNRaw)), DEFAULT_MAX_REC);
+
+    const minScoreRaw = readNumberOr((body as any)?.minScore, DEFAULT_MIN_SCORE);
+    const minScore = Math.max(0, Math.min(1, minScoreRaw));
+
+    const q = (body as any)?.quality;
+    const quality: "high" | "fast" = q === "high" ? "high" : "fast";
 
     const results = await Promise.all(
       items.map(async (it) => ({
@@ -491,8 +518,9 @@ export default async function handler(req: Request) {
     return new Response(JSON.stringify({ results }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  } catch (e: any) {
-    return new Response(JSON.stringify({ error: e?.message || String(e) }), {
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return new Response(JSON.stringify({ error: msg }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
