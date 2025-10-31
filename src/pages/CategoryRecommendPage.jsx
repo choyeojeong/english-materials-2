@@ -264,7 +264,7 @@ export default function CategoryRecommendPage() {
   const isOn = (pairId, categoryId) => {
     const set = selected[pairId];
     return set ? set.has(categoryId) : false;
-  };
+    };
 
   const toggle = (pairId, categoryId) => {
     if (!pairId || !categoryId) return;
@@ -295,14 +295,14 @@ export default function CategoryRecommendPage() {
     setResults((r) => ({ ...r, [pairId]: data ?? [] }));
   };
 
-  // 🔁 검색 결과 버튼도 토글 동작으로 변경
+  // 🔁 검색 결과 버튼도 토글 동작
   const addFromSearch = (pairId, cat) => {
     if (!pairId || !cat?.id) return;
     setCatMeta((prev) => ({
       ...prev,
       [cat.id]: { name: cat.name, parent_id: cat.parent_id ?? null },
     }));
-    toggle(pairId, cat.id); // 선택 ↔ 해제
+    toggle(pairId, cat.id);
   };
 
   const saveAll = async () => {
