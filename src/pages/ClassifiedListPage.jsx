@@ -5,6 +5,18 @@ import { supabase } from '../utils/supabaseClient';
 import DashboardButton from '../components/DashboardButton';
 import '../styles/ui.css';
 
+// ClassifyStartPage에서 했던 제목 만들기와 동일한 로직
+function buildTitle(grade, year, month, number) {
+  const g = (grade || '').trim();
+  const y = (year || '').toString().trim();
+  const m = (month || '').toString().trim();
+  const n = (number || '').toString().trim();
+  const base = [y && `${y}년`, g, m && `${m}월`, '모의고사']
+    .filter(Boolean)
+    .join(' ');
+  return [base || '무제 자료', n && `${n}번`].filter(Boolean).join(' ');
+}
+
 export default function ClassifiedListPage() {
   const nav = useNavigate();
 
@@ -20,6 +32,13 @@ export default function ClassifiedListPage() {
   const saveTimersRef = useRef({});
   const diffTimersRef = useRef({});
 
+  // 새로 추가: 어떤 자료 메타를 수정 중인지
+  const [editingMaterial, setEditingMaterial] = useState(null);
+  const [editGrade, setEditGrade] = useState('고1');
+  const [editYear, setEditYear] = useState('');
+  const [editMonth, setEditMonth] = useState('');
+  const [editNumber, setEditNumber] = useState('');
+
   useEffect(() => {
     if (tab === 'item') fetchMaterials();
     else fetchByCategory();
@@ -30,7 +49,8 @@ export default function ClassifiedListPage() {
     setLoading(true);
     const { data, error } = await supabase
       .from('materials')
-      .select('id, title, status, updated_at')
+      // grade/year/month/number 컬럼도 함께 가져온다고 가정
+      .select('id, title, status, updated_at, grade, year, month, number')
       .order('updated_at', { ascending: false })
       .limit(200);
     if (!error) setRows(data || []);
@@ -98,6 +118,10 @@ export default function ClassifiedListPage() {
     else {
       alert('삭제 완료!');
       fetchMaterials();
+      // 혹시 수정 폼이 그 자료를 보고 있으면 닫기
+      if (editingMaterial && editingMaterial.id === id) {
+        setEditingMaterial(null);
+      }
     }
   }
 
@@ -173,7 +197,51 @@ export default function ClassifiedListPage() {
     return Array.from(map.values()).sort((a, b) => b.items.length - a.items.length);
   }, [catRows, q]);
 
-  // ===================== UI =====================
+  // === 새로 추가: 메타 수정 시작 ===
+  function startEditMaterial(m) {
+    setEditingMaterial(m);
+    setEditGrade(m.grade || '고1');
+    setEditYear(m.year || new Date().getFullYear());
+    setEditMonth(m.month || '');
+    setEditNumber(m.number || '');
+  }
+
+  async function saveMaterialMeta() {
+    if (!editingMaterial) return;
+
+    const gOk = (editGrade || '').toString().trim().length > 0;
+    const yOk = (editYear || '').toString().trim().length > 0;
+    const mOk = (editMonth || '').toString().trim().length > 0;
+    const nOk = (editNumber || '').toString().trim().length > 0;
+    if (!gOk || !yOk || !mOk || !nOk) {
+      alert('학년, 연도, 월, 문항번호를 모두 입력하세요.');
+      return;
+    }
+
+    const newTitle = buildTitle(editGrade, editYear, editMonth, editNumber);
+
+    const { error } = await supabase
+      .from('materials')
+      .update({
+        grade: editGrade,
+        year: Number(editYear),
+        month: Number(editMonth),
+        number: Number(editNumber),
+        title: newTitle,
+      })
+      .eq('id', editingMaterial.id);
+
+    if (error) {
+      alert('수정 실패: ' + error.message);
+      return;
+    }
+
+    alert('수정되었습니다.');
+    setEditingMaterial(null);
+    await fetchMaterials();
+  }
+  // === 메타 수정 끝 ===
+
   return (
     <div className="ui-page">
       <div className="ui-wrap">
@@ -219,22 +287,133 @@ export default function ClassifiedListPage() {
             ) : (
               rows.map((m) => (
                 <div key={m.id} className="ui-card" style={{ marginBottom: 8 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 12,
+                    }}
+                  >
                     <div onClick={() => nav(`/category/recommend/${m.id}`)} style={{ cursor: 'pointer' }}>
                       <b>{m.title || '(제목 없음)'}</b>
                       <div style={{ fontSize: 13, color: '#5d6b82' }}>
                         상태: {m.status || '저장됨'} / {new Date(m.updated_at).toLocaleString('ko-KR')}
                       </div>
+                      {/* 메타 정보도 (있으면) 보여주기 */}
+                      <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>
+                        {m.year ? `${m.year}년` : ''} {m.grade ? m.grade : ''}{' '}
+                        {m.month ? `${m.month}월` : ''} {m.number ? `${m.number}번` : ''}
+                      </div>
                     </div>
-                    <button
-                      className="ui-btn danger sm"
-                      onClick={() => deleteMaterial(m.id)}
-                    >
-                      삭제
-                    </button>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        className="ui-btn sm"
+                        onClick={() => startEditMaterial(m)}
+                      >
+                        메타 수정
+                      </button>
+                      <button
+                        className="ui-btn danger sm"
+                        onClick={() => deleteMaterial(m.id)}
+                      >
+                        삭제
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))
+            )}
+
+            {/* 메타 수정 폼 */}
+            {editingMaterial && (
+              <div
+                className="ui-card"
+                style={{
+                  marginTop: 16,
+                  border: '1px solid #e2e8ff',
+                  background: '#f8f9ff',
+                }}
+              >
+                <div style={{ fontWeight: 700, marginBottom: 8 }}>
+                  메타 수정: {editingMaterial.title || '(제목 없음)'}
+                </div>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                    gap: 10,
+                  }}
+                >
+                  <div>
+                    <div className="ui-sub" style={{ marginBottom: 4 }}>
+                      학년
+                    </div>
+                    <select
+                      value={editGrade}
+                      onChange={(e) => setEditGrade(e.target.value)}
+                      style={{ width: '100%' }}
+                    >
+                      <option value="고1">고1</option>
+                      <option value="고2">고2</option>
+                      <option value="고3">고3</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div className="ui-sub" style={{ marginBottom: 4 }}>
+                      연도
+                    </div>
+                    <input
+                      type="number"
+                      value={editYear}
+                      onChange={(e) => setEditYear(e.target.value)}
+                      min={2000}
+                      max={2100}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                  <div>
+                    <div className="ui-sub" style={{ marginBottom: 4 }}>
+                      월
+                    </div>
+                    <select
+                      value={editMonth}
+                      onChange={(e) => setEditMonth(e.target.value)}
+                      style={{ width: '100%' }}
+                    >
+                      <option value="">선택</option>
+                      {Array.from({ length: 12 }).map((_, i) => {
+                        const m = i + 1;
+                        return (
+                          <option key={m} value={m}>
+                            {m}월
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                  <div>
+                    <div className="ui-sub" style={{ marginBottom: 4 }}>
+                      문항번호
+                    </div>
+                    <input
+                      type="number"
+                      value={editNumber}
+                      onChange={(e) => setEditNumber(e.target.value)}
+                      min={1}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                </div>
+                <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+                  <button className="ui-btn primary sm" onClick={saveMaterialMeta}>
+                    저장
+                  </button>
+                  <button className="ui-btn sm" onClick={() => setEditingMaterial(null)}>
+                    취소
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         )}
@@ -242,6 +421,20 @@ export default function ClassifiedListPage() {
         {/* ✅ 문장별 보기 */}
         {tab === 'category' && (
           <div className="ui-card" style={{ marginTop: 12 }}>
+            {/* 검색 */}
+            <div style={{ marginBottom: 10 }}>
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="분류(카테고리) 이름 검색"
+                style={{
+                  width: '100%',
+                  padding: '8px 10px',
+                  border: '1px solid #e3e8f2',
+                  borderRadius: 8,
+                }}
+              />
+            </div>
             {loading ? (
               <div className="ui-sub">불러오는 중...</div>
             ) : groupedCats.length === 0 ? (

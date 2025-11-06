@@ -72,6 +72,18 @@ export default function ClassifyStartPage() {
   }, [enList, koList, pairCount]);
 
   const onGo = () => {
+    // 0) 메타 필수값 체크
+    const gradeOk = (grade || '').toString().trim().length > 0;
+    const yearOk = (year || '').toString().trim().length > 0;
+    const monthOk = (month || '').toString().trim().length > 0;
+    const numberOk = (number || '').toString().trim().length > 0;
+
+    if (!gradeOk || !yearOk || !monthOk || !numberOk) {
+      alert('학년, 연도, 월, 문항번호를 모두 입력하세요.');
+      return;
+    }
+
+    // 1) 문장 존재 여부 체크
     if (!hasAny) {
       alert('분리할 문장이 없습니다. 왼쪽(영문) 입력 칸을 채워주세요.');
       return;
@@ -283,7 +295,9 @@ export default function ClassifyStartPage() {
                   gap: 12,
                 }}
               >
-                <div className="ui-sub">미리보기 (앞 {previewPairs.length}개)</div>
+                <div className="ui-sub">
+                  미리보기 (앞 {previewPairs.length}개)
+                </div>
                 <div />
               </div>
 
@@ -300,7 +314,9 @@ export default function ClassifyStartPage() {
                 >
                   <div style={{ fontSize: 14, color: '#1f2a44' }}>{p.en}</div>
                   <div style={{ fontSize: 14, color: '#1f2a44' }}>
-                    {p.ko || <span style={{ color: '#9aa7b5' }}>(비어 있음)</span>}
+                    {p.ko || (
+                      <span style={{ color: '#9aa7b5' }}>(비어 있음)</span>
+                    )}
                   </div>
                 </div>
               ))}
