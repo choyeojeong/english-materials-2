@@ -5,7 +5,7 @@ import { supabase } from '../utils/supabaseClient';
 import DashboardButton from '../components/DashboardButton';
 import '../styles/ui.css';
 
-// ClassifyStartPage에서 했던 제목 만들기와 동일한 로직
+// ClassifyStartPage와 같은 규칙으로 제목 생성
 function buildTitle(grade, year, month, number) {
   const g = (grade || '').trim();
   const y = (year || '').toString().trim();
@@ -20,10 +20,10 @@ function buildTitle(grade, year, month, number) {
 export default function ClassifiedListPage() {
   const nav = useNavigate();
 
-  const [tab, setTab] = useState('item');
+  const [tab, setTab] = useState('item'); // item | category
   const [status, setStatus] = useState('all');
-  const [rows, setRows] = useState([]);
-  const [catRows, setCatRows] = useState([]);
+  const [rows, setRows] = useState([]); // materials
+  const [catRows, setCatRows] = useState([]); // sentences
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState('');
   const [expanded, setExpanded] = useState({});
@@ -32,7 +32,7 @@ export default function ClassifiedListPage() {
   const saveTimersRef = useRef({});
   const diffTimersRef = useRef({});
 
-  // 새로 추가: 어떤 자료 메타를 수정 중인지
+  // 🔴 메타 수정용 상태
   const [editingMaterial, setEditingMaterial] = useState(null);
   const [editGrade, setEditGrade] = useState('고1');
   const [editYear, setEditYear] = useState('');
@@ -44,12 +44,11 @@ export default function ClassifiedListPage() {
     else fetchByCategory();
   }, [tab, status]);
 
-  // ✅ 자료 로드
+  // ✅ 자료 로드 (학년/연도/월/문항번호까지)
   async function fetchMaterials() {
     setLoading(true);
     const { data, error } = await supabase
       .from('materials')
-      // grade/year/month/number 컬럼도 함께 가져온다고 가정
       .select('id, title, status, updated_at, grade, year, month, number')
       .order('updated_at', { ascending: false })
       .limit(200);
@@ -57,10 +56,11 @@ export default function ClassifiedListPage() {
     setLoading(false);
   }
 
-  // ✅ 분류된 + 미분류 문장 로드
+  // ✅ 문장 로드 (분류된 + 미분류)
   async function fetchByCategory() {
     setLoading(true);
 
+    // 분류된 문장들
     const { data: viewData } = await supabase
       .from('v_category_pair_sentences')
       .select('*')
@@ -70,6 +70,7 @@ export default function ClassifiedListPage() {
       status === 'done' ? r.material_status === 'done' : true
     );
 
+    // 미분류 문장들
     let uncReq = supabase
       .from('material_pairs')
       .select(
@@ -78,9 +79,11 @@ export default function ClassifiedListPage() {
       )
       .is('material_pair_categories.pair_id', null)
       .limit(5000);
+
     if (status === 'done') {
       uncReq = uncReq.eq('materials.status', 'done');
     }
+
     const { data: uncData } = await uncReq;
 
     const uncategorized = (uncData ?? []).map((u) => ({
@@ -99,6 +102,7 @@ export default function ClassifiedListPage() {
     const merged = [...categorized, ...uncategorized];
     setCatRows(merged);
 
+    // used_in / difficulty 초기값 채우기
     const nextUsed = {};
     const nextDiff = {};
     for (const r of merged) {
@@ -107,6 +111,7 @@ export default function ClassifiedListPage() {
     }
     setUsedInMap(nextUsed);
     setDifficultyMap(nextDiff);
+
     setLoading(false);
   }
 
@@ -114,11 +119,12 @@ export default function ClassifiedListPage() {
   async function deleteMaterial(id) {
     if (!window.confirm('이 자료를 정말 삭제하시겠습니까?')) return;
     const { error } = await supabase.from('materials').delete().eq('id', id);
-    if (error) alert('삭제 실패: ' + error.message);
-    else {
+    if (error) {
+      alert('삭제 실패: ' + error.message);
+    } else {
       alert('삭제 완료!');
       fetchMaterials();
-      // 혹시 수정 폼이 그 자료를 보고 있으면 닫기
+      // 수정 중이던 자료였으면 폼도 닫기
       if (editingMaterial && editingMaterial.id === id) {
         setEditingMaterial(null);
       }
@@ -136,11 +142,12 @@ export default function ClassifiedListPage() {
     }
   }
 
-  // ✅ 공통
+  // ✅ 펼치기
   function toggleExpand(catId) {
     setExpanded((p) => ({ ...p, [catId]: !p[catId] }));
   }
 
+  // ✅ 난이도 뱃지
   function renderDifficultyBadge(code) {
     if (!code) return null;
     const text =
@@ -152,13 +159,16 @@ export default function ClassifiedListPage() {
         ? '#3b82f6'
         : '#ef4444';
     return (
-      <span className="ui-badge" style={{ background: color, color: '#fff', fontWeight: 600 }}>
+      <span
+        className="ui-badge"
+        style={{ background: color, color: '#fff', fontWeight: 600 }}
+      >
         {text}
       </span>
     );
   }
 
-  // ✅ 자동 저장
+  // ✅ 출처 자동 저장
   function onUsedInChange(pairId, value) {
     setUsedInMap((prev) => ({ ...prev, [pairId]: value }));
     if (saveTimersRef.current[pairId])
@@ -171,6 +181,7 @@ export default function ClassifiedListPage() {
     }, 600);
   }
 
+  // ✅ 난이도 자동 저장
   function onDifficultyChange(pairId, value) {
     setDifficultyMap((prev) => ({ ...prev, [pairId]: value }));
     if (diffTimersRef.current[pairId])
@@ -183,7 +194,7 @@ export default function ClassifiedListPage() {
     }, 600);
   }
 
-  // ✅ 분류 그룹화
+  // ✅ 문장들 카테고리별 묶기
   const groupedCats = useMemo(() => {
     const qn = q.trim().toLowerCase();
     const map = new Map();
@@ -191,13 +202,16 @@ export default function ClassifiedListPage() {
       const cid = r.category_id ?? 'UNCAT';
       const cname = r.category_name ?? '(미분류)';
       if (qn && !cname.toLowerCase().includes(qn)) continue;
-      if (!map.has(cid)) map.set(cid, { category_id: cid, category_name: cname, items: [] });
+      if (!map.has(cid))
+        map.set(cid, { category_id: cid, category_name: cname, items: [] });
       map.get(cid).items.push(r);
     }
-    return Array.from(map.values()).sort((a, b) => b.items.length - a.items.length);
+    return Array.from(map.values()).sort(
+      (a, b) => b.items.length - a.items.length
+    );
   }, [catRows, q]);
 
-  // === 새로 추가: 메타 수정 시작 ===
+  // 🔴 메타 수정 시작 버튼
   function startEditMaterial(m) {
     setEditingMaterial(m);
     setEditGrade(m.grade || '고1');
@@ -206,14 +220,11 @@ export default function ClassifiedListPage() {
     setEditNumber(m.number || '');
   }
 
+  // 🔴 메타 저장
   async function saveMaterialMeta() {
     if (!editingMaterial) return;
 
-    const gOk = (editGrade || '').toString().trim().length > 0;
-    const yOk = (editYear || '').toString().trim().length > 0;
-    const mOk = (editMonth || '').toString().trim().length > 0;
-    const nOk = (editNumber || '').toString().trim().length > 0;
-    if (!gOk || !yOk || !mOk || !nOk) {
+    if (!editGrade || !editYear || !editMonth || !editNumber) {
       alert('학년, 연도, 월, 문항번호를 모두 입력하세요.');
       return;
     }
@@ -238,13 +249,13 @@ export default function ClassifiedListPage() {
 
     alert('수정되었습니다.');
     setEditingMaterial(null);
-    await fetchMaterials();
+    fetchMaterials();
   }
-  // === 메타 수정 끝 ===
 
   return (
     <div className="ui-page">
       <div className="ui-wrap">
+        {/* 헤더 */}
         <div className="ui-head">
           <div>
             <div className="ui-title">분류 목록 관리</div>
@@ -254,8 +265,12 @@ export default function ClassifiedListPage() {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <DashboardButton />
-            <Link to="/category/manage" className="ui-btn sm">분류 관리로</Link>
-            <Link to="/category/start" className="ui-btn sm">분류 시작하기</Link>
+            <Link to="/category/manage" className="ui-btn sm">
+              분류 관리로
+            </Link>
+            <Link to="/category/start" className="ui-btn sm">
+              분류 시작하기
+            </Link>
           </div>
         </div>
 
@@ -295,17 +310,31 @@ export default function ClassifiedListPage() {
                       gap: 12,
                     }}
                   >
-                    <div onClick={() => nav(`/category/recommend/${m.id}`)} style={{ cursor: 'pointer' }}>
+                    {/* 자료 정보 */}
+                    <div
+                      onClick={() => nav(`/category/recommend/${m.id}`)}
+                      style={{ cursor: 'pointer' }}
+                    >
                       <b>{m.title || '(제목 없음)'}</b>
                       <div style={{ fontSize: 13, color: '#5d6b82' }}>
-                        상태: {m.status || '저장됨'} / {new Date(m.updated_at).toLocaleString('ko-KR')}
+                        상태: {m.status || '저장됨'} /{' '}
+                        {new Date(m.updated_at).toLocaleString('ko-KR')}
                       </div>
-                      {/* 메타 정보도 (있으면) 보여주기 */}
-                      <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>
-                        {m.year ? `${m.year}년` : ''} {m.grade ? m.grade : ''}{' '}
-                        {m.month ? `${m.month}월` : ''} {m.number ? `${m.number}번` : ''}
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: '#94a3b8',
+                          marginTop: 2,
+                        }}
+                      >
+                        {m.year ? `${m.year}년` : ''}{' '}
+                        {m.grade ? m.grade : ''}{' '}
+                        {m.month ? `${m.month}월` : ''}{' '}
+                        {m.number ? `${m.number}번` : ''}
                       </div>
                     </div>
+
+                    {/* 버튼들 */}
                     <div style={{ display: 'flex', gap: 6 }}>
                       <button
                         className="ui-btn sm"
@@ -325,7 +354,7 @@ export default function ClassifiedListPage() {
               ))
             )}
 
-            {/* 메타 수정 폼 */}
+            {/* 🔴 메타 수정 폼 */}
             {editingMaterial && (
               <div
                 className="ui-card"
@@ -406,10 +435,16 @@ export default function ClassifiedListPage() {
                   </div>
                 </div>
                 <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
-                  <button className="ui-btn primary sm" onClick={saveMaterialMeta}>
+                  <button
+                    className="ui-btn primary sm"
+                    onClick={saveMaterialMeta}
+                  >
                     저장
                   </button>
-                  <button className="ui-btn sm" onClick={() => setEditingMaterial(null)}>
+                  <button
+                    className="ui-btn sm"
+                    onClick={() => setEditingMaterial(null)}
+                  >
                     취소
                   </button>
                 </div>
@@ -421,7 +456,7 @@ export default function ClassifiedListPage() {
         {/* ✅ 문장별 보기 */}
         {tab === 'category' && (
           <div className="ui-card" style={{ marginTop: 12 }}>
-            {/* 검색 */}
+            {/* 검색창 */}
             <div style={{ marginBottom: 10 }}>
               <input
                 value={q}
@@ -443,40 +478,89 @@ export default function ClassifiedListPage() {
               groupedCats.map((cat) => {
                 const open = expanded[cat.category_id];
                 return (
-                  <div key={cat.category_id} className="ui-card" style={{ marginBottom: 10 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div
+                    key={cat.category_id}
+                    className="ui-card"
+                    style={{ marginBottom: 10 }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                         <b>{cat.category_name}</b>
                         <span className="ui-badge">{cat.items.length}문장</span>
                       </div>
-                      <button className="ui-btn sm" onClick={() => toggleExpand(cat.category_id)}>
+                      <button
+                        className="ui-btn sm"
+                        onClick={() => toggleExpand(cat.category_id)}
+                      >
                         {open ? '접기' : '펼치기'}
                       </button>
                     </div>
 
                     {open && (
-                      <div style={{ marginTop: 8, borderLeft: '3px solid #eef3ff', paddingLeft: 8 }}>
+                      <div
+                        style={{
+                          marginTop: 8,
+                          borderLeft: '3px solid #eef3ff',
+                          paddingLeft: 8,
+                        }}
+                      >
                         {cat.items.map((it) => (
-                          <div key={it.pair_id} className="ui-card" style={{ marginBottom: 8 }}>
-                            <div style={{ fontWeight: 700 }}>{it.en_sentence}</div>
-                            <div style={{ color: '#4b5563' }}>{it.ko_sentence}</div>
+                          <div
+                            key={it.pair_id}
+                            className="ui-card"
+                            style={{ marginBottom: 8 }}
+                          >
+                            <div style={{ fontWeight: 700 }}>
+                              {it.en_sentence}
+                            </div>
+                            <div style={{ color: '#4b5563' }}>
+                              {it.ko_sentence}
+                            </div>
 
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6 }}>
-                              <label style={{ fontSize: 12, color: '#555' }}>난이도:</label>
+                            <div
+                              style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: 10,
+                                marginTop: 6,
+                              }}
+                            >
+                              <label
+                                style={{ fontSize: 12, color: '#555' }}
+                              >
+                                난이도:
+                              </label>
                               <select
                                 value={difficultyMap[it.pair_id] ?? ''}
-                                onChange={(e) => onDifficultyChange(it.pair_id, e.target.value)}
+                                onChange={(e) =>
+                                  onDifficultyChange(
+                                    it.pair_id,
+                                    e.target.value
+                                  )
+                                }
                               >
                                 <option value="">(선택)</option>
                                 <option value="easy">쉬움</option>
                                 <option value="normal">보통</option>
                                 <option value="hard">어려움</option>
                               </select>
-                              {renderDifficultyBadge(difficultyMap[it.pair_id])}
-                              <span style={{ fontSize: 13 }}>출처: {it.material_title ?? '-'}</span>
+                              {renderDifficultyBadge(
+                                difficultyMap[it.pair_id]
+                              )}
+                              <span style={{ fontSize: 13 }}>
+                                출처: {it.material_title ?? '-'}
+                              </span>
                               <button
                                 className="ui-btn sm"
-                                onClick={() => nav(`/category/recommend/${it.material_id}`)}
+                                onClick={() =>
+                                  nav(`/category/recommend/${it.material_id}`)
+                                }
                               >
                                 이동
                               </button>
@@ -489,14 +573,29 @@ export default function ClassifiedListPage() {
                             </div>
 
                             <div style={{ marginTop: 8 }}>
-                              <label style={{ fontSize: 12, color: '#5d6b82', display: 'block', marginBottom: 4 }}>
+                              <label
+                                style={{
+                                  fontSize: 12,
+                                  color: '#5d6b82',
+                                  display: 'block',
+                                  marginBottom: 4,
+                                }}
+                              >
                                 교재 메모
                               </label>
                               <input
                                 value={usedInMap[it.pair_id] ?? ''}
-                                onChange={(e) => onUsedInChange(it.pair_id, e.target.value)}
+                                onChange={(e) =>
+                                  onUsedInChange(it.pair_id, e.target.value)
+                                }
                                 placeholder="예) 능률보카 3과 / 자작 프린트 5회차"
-                                style={{ width: '100%', padding: '8px 10px', border: '1px solid #e3e8f2', borderRadius: 8, fontSize: 13 }}
+                                style={{
+                                  width: '100%',
+                                  padding: '8px 10px',
+                                  border: '1px solid #e3e8f2',
+                                  borderRadius: 8,
+                                  fontSize: 13,
+                                }}
                               />
                             </div>
                           </div>
