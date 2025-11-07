@@ -67,6 +67,11 @@ export default function CategoryRecommendPage() {
     [params, sp]
   );
 
+  // 🔐 자동 저장 키
+  const STORAGE_KEY = materialId
+    ? `category_recommend_${materialId}`
+    : 'category_recommend_tmp';
+
   const [pairs, setPairs] = useState([]);
   const [recs, setRecs] = useState({});
   const [selected, setSelected] = useState({});
@@ -81,6 +86,10 @@ export default function CategoryRecommendPage() {
   // 🔹 난이도 상태 + 디바운서
   const [difficultyMap, setDifficultyMap] = useState({});
   const diffTimersRef = useRef({});
+
+  // 🔹 자동 저장 디바운서
+  const autosaveTimerRef = useRef(null);
+  const [autosaveStatus, setAutosaveStatus] = useState('idle'); // idle | saving | saved
 
   useEffect(() => {
     let alive = true;
@@ -98,19 +107,19 @@ export default function CategoryRecommendPage() {
           .order('order_index', { ascending: true });
         if (e1) throw e1;
 
-        // 2) 카테고리 전체 로드(경로(path) → id 매핑 강화)
+        // 2) 카테고리 전체 로드
         const { meta: allMeta, leaves: allLeaves, resolvePath } =
           await loadAllCategories();
         if (!alive) return;
         setCatMeta(allMeta);
         setLeafIds(allLeaves);
 
-        // 2-1) leafPaths(문자열) 구성 → Vercel 함수에 전달해 리프만 허용
+        // 2-1) leafPaths → 추천 API에 전달
         const leafPathList = Array.from(allLeaves)
           .map((cid) => pathStringForDB(cid, allMeta))
           .filter(Boolean);
 
-        // 3) Vercel 함수로 한 번에 추천 요청(배치)
+        // 3) 추천 요청
         const payload = (pairRows ?? []).map((p) => ({
           pair_id: p.id,
           en: p.en_sentence || '',
@@ -119,10 +128,13 @@ export default function CategoryRecommendPage() {
 
         const apiResults =
           payload.length > 0
-            ? await callRecommendAPI(payload, leafPathList, { topN: 6, minScore: 0.5, quality: 'high' })
+            ? await callRecommendAPI(payload, leafPathList, {
+                topN: 6,
+                minScore: 0.5,
+                quality: 'high',
+              })
             : [];
 
-        // API 결과 → pair_id별 + DB 리프 매핑
         const recMap = {};
         const rawUnmatched = {};
         const rawNonLeaf = {};
@@ -155,12 +167,11 @@ export default function CategoryRecommendPage() {
               });
             }
           }
-          // 점수 높은 순으로 정렬
           arr.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
           if (arr.length > 0) recMap[pid] = arr;
         }
 
-        // 4) 기존 선택값 불러오기
+        // 4) 기존 선택값 DB에서
         const pairIds = (pairRows ?? []).map((p) => p.id).filter(Boolean);
         let selRows = [];
         if (pairIds.length > 0) {
@@ -171,7 +182,6 @@ export default function CategoryRecommendPage() {
           if (e3) throw e3;
           selRows = data ?? [];
         }
-
         const selMap = {};
         for (const id of pairIds) selMap[id] = new Set();
         for (const s of selRows) {
@@ -183,12 +193,36 @@ export default function CategoryRecommendPage() {
         const nextDiff = {};
         for (const p of pairRows ?? []) nextDiff[p.id] = p.difficulty ?? '';
 
+        // 6) 🔁 로컬 자동 저장돼 있던 거 있으면 합치기
+        let restoredSelected = selMap;
+        try {
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            if (parsed && parsed.selected) {
+              // parsed.selected: { pairId: [catId, catId...] }
+              const merged = {};
+              for (const pid of pairIds) {
+                const dbSet = selMap[pid] ? new Set(selMap[pid]) : new Set();
+                const localArr = parsed.selected[pid];
+                if (Array.isArray(localArr)) {
+                  for (const cid of localArr) dbSet.add(cid);
+                }
+                merged[pid] = dbSet;
+              }
+              restoredSelected = merged;
+            }
+          }
+        } catch (err) {
+          console.warn('[autosave restore failed]', err);
+        }
+
         if (!alive) return;
         setPairs(pairRows ?? []);
         setRecs(recMap);
         setUnmatched(rawUnmatched);
         setNonLeaf(rawNonLeaf);
-        setSelected(selMap);
+        setSelected(restoredSelected);
         setDifficultyMap(nextDiff);
       } catch (err) {
         console.error('[CategoryRecommendPage] init error', err);
@@ -200,7 +234,7 @@ export default function CategoryRecommendPage() {
     return () => {
       alive = false;
     };
-  }, [materialId]);
+  }, [materialId, STORAGE_KEY]);
 
   // --- Helpers --------------------------------------------------------------
   async function loadAllCategories() {
@@ -332,7 +366,7 @@ export default function CategoryRecommendPage() {
       });
       if (e1) throw e1;
 
-      // 2) 학습 데이터 누적 (선택된 분류를 텍스트 경로로 저장)
+      // 2) 학습 데이터 누적
       await Promise.all(
         (pairs ?? []).map(async (p) => {
           const chosenIds = Array.from(selected[p.id] ?? []).filter((cid) => leafIds.has(cid));
@@ -350,6 +384,9 @@ export default function CategoryRecommendPage() {
           if (error) console.warn('[save_pair_feedback]', p.id, error.message);
         })
       );
+
+      // 저장 성공했으면 로컬 것도 비워줄 수 있음
+      localStorage.removeItem(STORAGE_KEY);
 
       alert('저장되었습니다.');
     } catch (err) {
@@ -380,6 +417,35 @@ export default function CategoryRecommendPage() {
   const difficultyLabel = (code) =>
     code === 'easy' ? '쉬움' : code === 'normal' ? '보통' : code === 'hard' ? '어려움' : '(선택)';
 
+  // 🔁 🔁 🔁 선택 상태 로컬 자동 저장
+  useEffect(() => {
+    // selected가 Set이라 바로 저장하면 안 돼서 배열로 변환
+    setAutosaveStatus('saving');
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+
+    autosaveTimerRef.current = setTimeout(() => {
+      try {
+        const plainSelected = {};
+        for (const [pid, set] of Object.entries(selected)) {
+          plainSelected[pid] = Array.from(set || []);
+        }
+        const payload = {
+          selected: plainSelected,
+          ts: Date.now(),
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        setAutosaveStatus('saved');
+      } catch (e) {
+        console.warn('[autosave failed]', e);
+        setAutosaveStatus('idle');
+      }
+    }, 800);
+
+    return () => {
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    };
+  }, [selected, STORAGE_KEY]);
+
   // --------------------------------------------------------------------
   return (
     <div className="ui-page">
@@ -392,7 +458,17 @@ export default function CategoryRecommendPage() {
               각 추천에는 <b>이유(reason)</b>와 <b>확신도(score)</b>가 함께 제공됩니다.
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {autosaveStatus === 'saving' && (
+              <span className="ui-sub" style={{ fontSize: 12, color: '#3b82f6' }}>
+                자동 저장 중…
+              </span>
+            )}
+            {autosaveStatus === 'saved' && (
+              <span className="ui-sub" style={{ fontSize: 12, color: '#10b981' }}>
+                자동 저장됨
+              </span>
+            )}
             <DashboardButton />
             <Link to="/category/done" className="ui-btn sm">분류 완료 목록으로</Link>
           </div>
