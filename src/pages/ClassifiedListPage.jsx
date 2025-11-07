@@ -187,6 +187,20 @@ export default function ClassifiedListPage() {
     }, 600);
   }
 
+  // ✅ 클립보드 복사
+  async function copyText(text) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      // 조용히 성공해도 되고
+      // alert('복사되었습니다.');
+    } catch (e) {
+      // https 환경 아니거나 권한 없을 때
+      alert('복사에 실패했습니다. 브라우저 권한을 확인해주세요.');
+      console.error(e);
+    }
+  }
+
   // ✅ 문장 그룹화 (문장별 보기 탭)
   const groupedCats = useMemo(() => {
     const qn = q.trim().toLowerCase();
@@ -545,8 +559,41 @@ export default function ClassifiedListPage() {
                       <div style={{ marginTop: 8, borderLeft: '3px solid #eef3ff', paddingLeft: 8 }}>
                         {cat.items.map((it) => (
                           <div key={it.pair_id} className="ui-card" style={{ marginBottom: 8 }}>
-                            <div style={{ fontWeight: 700 }}>{it.en_sentence}</div>
-                            <div style={{ color: '#4b5563' }}>{it.ko_sentence}</div>
+                            {/* 영어 문장 + 복사 */}
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'flex-start',
+                                gap: 6,
+                              }}
+                            >
+                              <div style={{ fontWeight: 700, flex: 1 }}>{it.en_sentence}</div>
+                              <button
+                                className="ui-btn sm"
+                                onClick={() => copyText(it.en_sentence)}
+                                title="영어 문장 복사"
+                              >
+                                복사
+                              </button>
+                            </div>
+                            {/* 한국어 문장 + 복사 */}
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'flex-start',
+                                gap: 6,
+                                marginTop: 4,
+                              }}
+                            >
+                              <div style={{ color: '#4b5563', flex: 1 }}>{it.ko_sentence}</div>
+                              <button
+                                className="ui-btn sm"
+                                onClick={() => copyText(it.ko_sentence)}
+                                title="한국어 문장 복사"
+                              >
+                                복사
+                              </button>
+                            </div>
 
                             <div
                               style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6 }}

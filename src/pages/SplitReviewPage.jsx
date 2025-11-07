@@ -23,6 +23,7 @@ export default function SplitReviewPage() {
   const { state } = useLocation();
   const navigate = useNavigate();
 
+  // 초기 문장 세팅
   const seed = useMemo(() => {
     if (Array.isArray(state?.pairs) && state.pairs.length) {
       return {
@@ -44,10 +45,13 @@ export default function SplitReviewPage() {
   const [koRows, setKoRows] = useState(seed.koRows);
   const rows = Math.max(enRows.length, koRows.length, 1);
 
+  // en/ko 길이 맞추기
   useEffect(() => {
     const max = Math.max(enRows.length, koRows.length);
-    if (enRows.length < max) setEnRows((prev) => prev.concat(Array(max - prev.length).fill('')));
-    if (koRows.length < max) setKoRows((prev) => prev.concat(Array(max - prev.length).fill('')));
+    if (enRows.length < max)
+      setEnRows((prev) => prev.concat(Array(max - prev.length).fill('')));
+    if (koRows.length < max)
+      setKoRows((prev) => prev.concat(Array(max - prev.length).fill('')));
   }, [enRows.length, koRows.length]);
 
   const [cur, setCur] = useState({ side: 'en', index: 0, start: 0, end: 0 });
@@ -77,8 +81,11 @@ export default function SplitReviewPage() {
       }
     }, 0);
 
-  // Undo/Redo
-  const STORAGE_KEY = useMemo(() => `split_session_${state?.meta?.title ?? 'untitled'}`, [state?.meta?.title]);
+  // Undo/Redo + 로컬스토리지
+  const STORAGE_KEY = useMemo(
+    () => `split_session_${state?.meta?.title ?? 'untitled'}`,
+    [state?.meta?.title]
+  );
   const [hist, setHist] = useState([{ en: enRows, ko: koRows }]);
   const [hIdx, setHIdx] = useState(0);
   const commit = (nextEN, nextKO) => {
@@ -89,9 +96,32 @@ export default function SplitReviewPage() {
     setEnRows(nextEN);
     setKoRows(nextKO);
   };
-  const undo = () => { if (hIdx > 0) { const prev = hist[hIdx - 1]; setHIdx(hIdx - 1); setEnRows(prev.en); setKoRows(prev.ko); } };
-  const redo = () => { if (hIdx < hist.length - 1) { const nx = hist[hIdx + 1]; setHIdx(hIdx + 1); setEnRows(nx.en); setKoRows(nx.ko); } };
-  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify({ en: enRows, ko: koRows })); }, [STORAGE_KEY, enRows, koRows]);
+  const undo = () => {
+    if (hIdx > 0) {
+      const prev = hist[hIdx - 1];
+      setHIdx(hIdx - 1);
+      setEnRows(prev.en);
+      setKoRows(prev.ko);
+    }
+  };
+  const redo = () => {
+    if (hIdx < hist.length - 1) {
+      const nx = hist[hIdx + 1];
+      setHIdx(hIdx + 1);
+      setEnRows(nx.en);
+      setKoRows(nx.ko);
+    }
+  };
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ en: enRows, ko: koRows }));
+  }, [STORAGE_KEY, enRows, koRows]);
+
+  // 🔁 서버 자동 저장용 materialId
+  const [materialId, setMaterialId] = useState(
+    state?.meta?.material_id || state?.materialId || null
+  );
+  const autosaveTimerRef = useRef(null);
+  const [autosaveStatus, setAutosaveStatus] = useState('idle'); // idle | saving | saved
 
   // 나눔/합침
   const splitActive = () => {
@@ -165,59 +195,68 @@ export default function SplitReviewPage() {
     focusCell(cur.side, Math.max(0, i - 1), 0);
   };
 
-  // 저장
+  // 저장 버튼용
   const [saving, setSaving] = useState(false);
 
+  // 실제 저장 공통 로직 (버튼 저장/자동저장 둘 다 이걸 씀)
+  const saveToSupabase = async ({ finalize = false } = {}) => {
+    const n = Math.max(enRows.length, koRows.length);
+    const pairsPayload = Array.from({ length: n }).map((_, i) => ({
+      order_index: i,
+      en_sentence: trim1(enRows[i] ?? ''),
+      ko_sentence: trim1(koRows[i] ?? ''),
+    }));
+    if (!pairsPayload.some((p) => hasText(p.en_sentence))) {
+      // 자동저장이면 조용히 패스
+      if (!finalize) return;
+      alert('저장할 영문 문장이 없습니다.');
+      return;
+    }
+
+    // materialId 없으면 하나 만든다
+    let mid = materialId;
+    if (!mid) {
+      const baseRow = {
+        title: state?.meta?.title ?? '무제 자료',
+        grade: state?.meta?.grade ?? null,
+        year: state?.meta?.year ?? null,
+        month: state?.meta?.month ?? null,
+        number: state?.meta?.number ?? null,
+        status: 'review',
+      };
+      const { data, error } = await supabase
+        .from('materials')
+        .insert([baseRow])
+        .select('id')
+        .single();
+      if (error) throw new Error(`[materials.insert] ${error.message}`);
+      mid = data.id;
+      setMaterialId(mid);
+    }
+
+    // 문장 덮어쓰기
+    const { error } = await supabase.rpc('material_overwrite_pairs', {
+      p_material_id: mid,
+      p_pairs: pairsPayload,
+    });
+    if (error) throw new Error(`[material_overwrite_pairs] ${error.message}`);
+
+    // 상태 업데이트: 자동저장은 review로만, 최종 저장은 done
+    const { error: stErr } = await supabase.rpc('material_update_status', {
+      p_material_id: mid,
+      p_status: finalize ? 'done' : 'review',
+    });
+    if (stErr) throw new Error(`[material_update_status] ${stErr.message}`);
+
+    return mid;
+  };
+
+  // 버튼으로 저장 → 추천 페이지로 이동
   const handleSave = async () => {
     try {
       setSaving(true);
-      const n = Math.max(enRows.length, koRows.length);
-
-      const pairsPayload = Array.from({ length: n }).map((_, i) => ({
-        order_index: i,
-        en_sentence: trim1(enRows[i] ?? ''),
-        ko_sentence: trim1(koRows[i] ?? ''),
-      }));
-      if (!pairsPayload.some((p) => hasText(p.en_sentence))) {
-        alert('저장할 영문 문장이 없습니다.');
-        setSaving(false);
-        return;
-      }
-
-      const materialId =
-        state?.meta?.material_id ||
-        state?.materialId ||
-        (await (async () => {
-          const baseRow = {
-            title: state?.meta?.title ?? '무제 자료',
-            grade: state?.meta?.grade ?? null,
-            year: state?.meta?.year ?? null,
-            month: state?.meta?.month ?? null,
-            number: state?.meta?.number ?? null,
-            status: 'review',
-          };
-          const { data, error } = await supabase
-            .from('materials')
-            .insert([baseRow])
-            .select('id')
-            .single();
-          if (error) throw new Error(`[materials.insert] ${error.message}`);
-          return data.id;
-        })());
-
-      const { error } = await supabase.rpc('material_overwrite_pairs', {
-        p_material_id: materialId,
-        p_pairs: pairsPayload, // en_sentence / ko_sentence로 전달
-      });
-      if (error) throw new Error(`[material_overwrite_pairs] ${error.message}`);
-
-      const { error: stErr } = await supabase.rpc('material_update_status', {
-        p_material_id: materialId,
-        p_status: 'done',
-      });
-      if (stErr) throw new Error(`[material_update_status] ${stErr.message}`);
-
-      navigate(`/category/recommend/${materialId}`, { replace: true });
+      const mid = await saveToSupabase({ finalize: true });
+      navigate(`/category/recommend/${mid}`, { replace: true });
     } catch (err) {
       console.error(err);
       alert(`저장 중 오류가 발생했습니다.\n${err?.message ?? err}`);
@@ -226,7 +265,27 @@ export default function SplitReviewPage() {
     }
   };
 
-  // 🔥 단축키: Enter=나눔, Ctrl+Backspace=위와 합침(커서 맨 앞), Ctrl+Delete=다음과 합침(커서 맨 끝)
+  // 🔁 자동 저장 디바운스
+  useEffect(() => {
+    // 내용이 바뀔 때마다 1.2초 뒤에 자동 저장
+    setAutosaveStatus('saving');
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(async () => {
+      try {
+        await saveToSupabase({ finalize: false });
+        setAutosaveStatus('saved');
+      } catch (e) {
+        console.warn('autosave failed', e);
+        setAutosaveStatus('idle');
+      }
+    }, 1200);
+    return () => {
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enRows, koRows]); // 내용이 바뀔 때마다
+
+  // 🔥 단축키
   const handleKeyDown = (side, i) => (e) => {
     const ref = side === 'en' ? enRefs.current[i] : koRefs.current[i];
     if (!ref) return;
@@ -273,19 +332,44 @@ export default function SplitReviewPage() {
               커서 위치 기준으로 <b>나누기·합치기</b>를 적용하고, Undo/Redo로 되돌릴 수 있어요.
             </div>
           </div>
-          <DashboardButton />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="ui-btn sm" onClick={() => navigate('/category/start')}>
+              ← 분류 시작하기로
+            </button>
+            <DashboardButton />
+          </div>
         </div>
 
         {/* 툴바 */}
-        <div className="ui-card" style={{ display:'flex', alignItems:'center', gap:8 }}>
-          <span className="ui-badge">행 {rows}</span>
-          <div style={{ flex:1 }} />
-          <button className="ui-btn sm" onClick={undo} disabled={hIdx === 0}>↶ Undo</button>
-          <button className="ui-btn sm" onClick={redo} disabled={hIdx === hist.length - 1}>↷ Redo</button>
+        <div
+          className="ui-card"
+          style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}
+        >
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span className="ui-badge">행 {rows}</span>
+            {autosaveStatus === 'saving' && (
+              <span className="ui-sub" style={{ color: '#3b82f6' }}>
+                자동 저장 중...
+              </span>
+            )}
+            {autosaveStatus === 'saved' && (
+              <span className="ui-sub" style={{ color: '#10b981' }}>
+                자동 저장됨
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button className="ui-btn sm" onClick={undo} disabled={hIdx === 0}>
+              ↶ Undo
+            </button>
+            <button className="ui-btn sm" onClick={redo} disabled={hIdx === hist.length - 1}>
+              ↷ Redo
+            </button>
+          </div>
         </div>
 
         {/* 본문 표 */}
-        <div className="ui-card" style={{ marginTop:12 }}>
+        <div className="ui-card" style={{ marginTop: 12 }}>
           <div className="ui-table-wrap">
             <table style={S.table}>
               <thead>
@@ -297,14 +381,17 @@ export default function SplitReviewPage() {
               </thead>
               <tbody>
                 {Array.from({ length: rows }).map((_, i) => (
-                  <tr key={i} style={{ height:'100%' }}>
+                  <tr key={i} style={{ height: '100%' }}>
                     {/* EN */}
                     <td style={S.td}>
                       <div style={S.cell}>
                         <div style={S.tools}>
                           <button
                             className="ui-badge"
-                            onClick={() => { setCur({ side: 'en', index: i }); mergeWithPrev(); }}
+                            onClick={() => {
+                              setCur({ side: 'en', index: i });
+                              mergeWithPrev();
+                            }}
                           >
                             ⟵ 합침
                           </button>
@@ -325,7 +412,10 @@ export default function SplitReviewPage() {
                           </button>
                           <button
                             className="ui-badge"
-                            onClick={() => { setCur({ side: 'en', index: i }); mergeWithNext(); }}
+                            onClick={() => {
+                              setCur({ side: 'en', index: i });
+                              mergeWithNext();
+                            }}
                           >
                             합침 ⟶
                           </button>
@@ -336,7 +426,7 @@ export default function SplitReviewPage() {
                           onFocus={onFocus('en', i)}
                           onClick={onCaret('en', i)}
                           onKeyUp={onCaret('en', i)}
-                          onKeyDown={handleKeyDown('en', i)}   // 단축키
+                          onKeyDown={handleKeyDown('en', i)}
                           onChange={(e) => {
                             const next = [...enRows];
                             next[i] = e.target.value;
@@ -353,7 +443,10 @@ export default function SplitReviewPage() {
                         <div style={S.tools}>
                           <button
                             className="ui-badge"
-                            onClick={() => { setCur({ side: 'ko', index: i }); mergeWithPrev(); }}
+                            onClick={() => {
+                              setCur({ side: 'ko', index: i });
+                              mergeWithPrev();
+                            }}
                           >
                             ⟵ 합침
                           </button>
@@ -374,7 +467,10 @@ export default function SplitReviewPage() {
                           </button>
                           <button
                             className="ui-badge"
-                            onClick={() => { setCur({ side: 'ko', index: i }); mergeWithNext(); }}
+                            onClick={() => {
+                              setCur({ side: 'ko', index: i });
+                              mergeWithNext();
+                            }}
                           >
                             합침 ⟶
                           </button>
@@ -385,7 +481,7 @@ export default function SplitReviewPage() {
                           onFocus={onFocus('ko', i)}
                           onClick={onCaret('ko', i)}
                           onKeyUp={onCaret('ko', i)}
-                          onKeyDown={handleKeyDown('ko', i)}   // 단축키
+                          onKeyDown={handleKeyDown('ko', i)}
                           onChange={(e) => {
                             const next = [...koRows];
                             next[i] = e.target.value;
@@ -400,8 +496,12 @@ export default function SplitReviewPage() {
                     {/* 도구: 추가/삭제 */}
                     <td style={S.tdTool}>
                       <div style={S.vtools}>
-                        <button className="ui-btn sm" onClick={() => addRow(i)}>＋</button>
-                        <button className="ui-btn sm" onClick={() => removeRow(i)}>－</button>
+                        <button className="ui-btn sm" onClick={() => addRow(i)}>
+                          ＋
+                        </button>
+                        <button className="ui-btn sm" onClick={() => removeRow(i)}>
+                          －
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -410,8 +510,8 @@ export default function SplitReviewPage() {
             </table>
           </div>
 
-          {/* 하단 버튼 + 단축키 안내 */}
-          <div className="ui-toolbar" style={{ justifyContent:'space-between', marginTop:12 }}>
+          {/* 하단 버튼 */}
+          <div className="ui-toolbar" style={{ justifyContent: 'space-between', marginTop: 12 }}>
             <div className="ui-sub">
               <b>단축키</b> · Enter=나누기 · Ctrl+Backspace(맨앞)=위와 합침 · Ctrl+Delete(맨끝)=다음과 합침
             </div>
@@ -437,19 +537,46 @@ export default function SplitReviewPage() {
   );
 }
 
-// 로컬 스타일(구조 유지, UI 토큰과 조화)
+// 로컬 스타일
 const S = {
-  table: { width: '100%', borderCollapse: 'separate', borderSpacing: '0 12px', minWidth: 720 },
-  th: { textAlign: 'left', padding: '10px 12px', background: '#f3f6fb', color: '#3b4b66', fontWeight: 800, border: '1px solid #e5e8ef', borderRadius: 8, fontSize: 13 },
+  table: {
+    width: '100%',
+    borderCollapse: 'separate',
+    borderSpacing: '0 12px',
+    minWidth: 720,
+  },
+  th: {
+    textAlign: 'left',
+    padding: '10px 12px',
+    background: '#f3f6fb',
+    color: '#3b4b66',
+    fontWeight: 800,
+    border: '1px solid #e5e8ef',
+    borderRadius: 8,
+    fontSize: 13,
+  },
   td: { verticalAlign: 'top', padding: '0 10px' },
   tdTool: { verticalAlign: 'top', paddingTop: 6, width: 120 },
-  cell: { position: 'relative', background: '#fff', border: '1px solid #e6e9f1', borderRadius: 10, padding: 10, boxShadow: '0 1px 2px rgba(0,0,0,0.04)' },
-  tools: { position: 'absolute', top: -11, left: 10, display: 'flex', gap: 6 },
+  cell: {
+    position: 'relative',
+    background: '#fff',
+    border: '1px solid #e6e9f1',
+    borderRadius: 10,
+    padding: 10,
+    boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+  },
+  tools: {
+    position: 'absolute',
+    top: -11,
+    left: 10,
+    display: 'flex',
+    gap: 6,
+  },
   ta: {
     width: '100%',
     minHeight: 110,
     resize: 'vertical',
-    border: '1px solid #e5e7eb',   // ✅ 따옴표 수정
+    border: '1px solid #e5e7eb',
     borderRadius: 8,
     padding: '10px 12px',
     outline: 'none',

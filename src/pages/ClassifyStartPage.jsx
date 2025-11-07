@@ -1,8 +1,10 @@
 // src/pages/ClassifyStartPage.jsx
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import DashboardButton from '../components/DashboardButton';
 import '../styles/ui.css';
+
+const STORAGE_KEY = 'classify_start_draft_v1';
 
 function splitIntoSentences(raw) {
   // 1) 줄바꿈 우선
@@ -40,8 +42,22 @@ function buildTitle(grade, year, month, number) {
   return [base || '무제 자료', n && `${n}번`].filter(Boolean).join(' ');
 }
 
+// 한 덩어리 텍스트의 공백을 예쁘게 정리하는 함수
+function normalizeBlockText(raw) {
+  return (raw || '')
+    .split(/\r?\n/)
+    .map((line) =>
+      line
+        .replace(/\s+/g, ' ') // 줄 안쪽 여러 공백 → 1칸
+        .trim()
+    )
+    .filter(Boolean) // 빈 줄 제거
+    .join('\n'); // 다시 줄로 합치기
+}
+
 export default function ClassifyStartPage() {
   const nav = useNavigate();
+  const autosaveTimerRef = useRef(null);
 
   // 메타(학년/연도/월/문항번호)
   const [grade, setGrade] = useState('고1');
@@ -52,6 +68,53 @@ export default function ClassifyStartPage() {
   // 본문 입력(영문/한글)
   const [rawEN, setRawEN] = useState('');
   const [rawKO, setRawKO] = useState('');
+
+  // 자동 저장 상태 표시
+  const [autosaveStatus, setAutosaveStatus] = useState('idle'); // idle | saving | saved
+
+  // 처음 들어올 때 로컬 저장된 초안 불러오기
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.grade) setGrade(parsed.grade);
+        if (parsed.year) setYear(parsed.year);
+        if (parsed.month !== undefined) setMonth(parsed.month);
+        if (parsed.number !== undefined) setNumber(parsed.number);
+        if (parsed.rawEN !== undefined) setRawEN(parsed.rawEN);
+        if (parsed.rawKO !== undefined) setRawKO(parsed.rawKO);
+      }
+    } catch (e) {
+      console.warn('failed to load draft', e);
+    }
+  }, []);
+
+  // 입력이 바뀔 때마다 0.9초 후 자동 저장
+  useEffect(() => {
+    setAutosaveStatus('saving');
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => {
+      try {
+        const payload = {
+          grade,
+          year,
+          month,
+          number,
+          rawEN,
+          rawKO,
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        setAutosaveStatus('saved');
+      } catch (e) {
+        console.warn('failed to autosave', e);
+        setAutosaveStatus('idle');
+      }
+    }, 900);
+    return () => {
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    };
+  }, [grade, year, month, number, rawEN, rawKO]);
 
   const enList = useMemo(() => splitIntoSentences(rawEN), [rawEN]);
   const koList = useMemo(() => splitIntoSentences(rawKO), [rawKO]);
@@ -110,6 +173,14 @@ export default function ClassifyStartPage() {
     nav('/category/start/review', { state: { meta, pairs } });
   };
 
+  // 공백 정리 핸들러
+  const handleNormalizeEN = () => {
+    setRawEN((prev) => normalizeBlockText(prev));
+  };
+  const handleNormalizeKO = () => {
+    setRawKO((prev) => normalizeBlockText(prev));
+  };
+
   return (
     <div className="ui-page">
       <div className="ui-wrap">
@@ -121,7 +192,19 @@ export default function ClassifyStartPage() {
               학년/연도/월/문항번호를 입력하고, 영문과 한국어 해석을 붙여넣으세요.
             </div>
           </div>
-          <DashboardButton />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {autosaveStatus === 'saving' && (
+              <span className="ui-sub" style={{ color: '#3b82f6', fontSize: 12 }}>
+                자동 저장 중…
+              </span>
+            )}
+            {autosaveStatus === 'saved' && (
+              <span className="ui-sub" style={{ color: '#10b981', fontSize: 12 }}>
+                자동 저장됨
+              </span>
+            )}
+            <DashboardButton />
+          </div>
         </div>
 
         {/* 본문 카드 */}
@@ -233,8 +316,18 @@ export default function ClassifyStartPage() {
             }}
           >
             <div>
-              <div className="ui-sub" style={{ marginBottom: 6 }}>
-                영문 텍스트
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: 6,
+                }}
+              >
+                <div className="ui-sub">영문 텍스트</div>
+                <button className="ui-btn sm" onClick={handleNormalizeEN}>
+                  공백 정리
+                </button>
               </div>
               <textarea
                 style={{
@@ -255,8 +348,18 @@ export default function ClassifyStartPage() {
               </p>
             </div>
             <div>
-              <div className="ui-sub" style={{ marginBottom: 6 }}>
-                한국어 해석 (선택)
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: 6,
+                }}
+              >
+                <div className="ui-sub">한국어 해석 (선택)</div>
+                <button className="ui-btn sm" onClick={handleNormalizeKO}>
+                  공백 정리
+                </button>
               </div>
               <textarea
                 style={{
@@ -295,9 +398,7 @@ export default function ClassifyStartPage() {
                   gap: 12,
                 }}
               >
-                <div className="ui-sub">
-                  미리보기 (앞 {previewPairs.length}개)
-                </div>
+                <div className="ui-sub">미리보기 (앞 {previewPairs.length}개)</div>
                 <div />
               </div>
 
@@ -314,9 +415,7 @@ export default function ClassifyStartPage() {
                 >
                   <div style={{ fontSize: 14, color: '#1f2a44' }}>{p.en}</div>
                   <div style={{ fontSize: 14, color: '#1f2a44' }}>
-                    {p.ko || (
-                      <span style={{ color: '#9aa7b5' }}>(비어 있음)</span>
-                    )}
+                    {p.ko || <span style={{ color: '#9aa7b5' }}>(비어 있음)</span>}
                   </div>
                 </div>
               ))}
@@ -351,7 +450,8 @@ export default function ClassifyStartPage() {
 
           <p className="ui-sub" style={{ marginTop: 8 }}>
             • EN/KO 문장 수가 달라도 <b>영문(EN) 기준</b>으로 페어링합니다. <br />
-            • 입력한 학년/연도/월/문항번호로 제목이 자동 생성됩니다.
+            • 입력한 학년/연도/월/문항번호로 제목이 자동 생성됩니다. <br />
+            • 입력 내용은 브라우저에 자동 저장돼요.
           </p>
         </div>
 
