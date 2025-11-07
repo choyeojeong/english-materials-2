@@ -46,6 +46,9 @@ export default function ClassifiedListPage() {
   const [editMonth, setEditMonth] = useState('');
   const [editNumber, setEditNumber] = useState('');
 
+  // 🔴 그룹 접기/펼치기 상태 (자료별 보기용)
+  const [groupOpen, setGroupOpen] = useState({});
+
   useEffect(() => {
     if (tab === 'item') fetchMaterials();
     else fetchByCategory();
@@ -139,7 +142,7 @@ export default function ClassifiedListPage() {
     }
   }
 
-  // ✅ 펼치기
+  // ✅ 문장별 보기 펼치기
   function toggleExpand(catId) {
     setExpanded((p) => ({ ...p, [catId]: !p[catId] }));
   }
@@ -208,6 +211,7 @@ export default function ClassifiedListPage() {
       const key = `${g}|${y}|${mm}`;
       if (!map.has(key)) {
         map.set(key, {
+          key,
           grade: g,
           year: y,
           month: mm,
@@ -217,7 +221,6 @@ export default function ClassifiedListPage() {
       map.get(key).items.push(m);
     }
 
-    // 그룹 정렬: 연도 ↓, 월 ↓, 학년(고1→고2→고3)
     const arr = Array.from(map.values());
     arr.sort((a, b) => {
       const ay = Number(a.year) || 0;
@@ -231,7 +234,6 @@ export default function ClassifiedListPage() {
       return ag - bg;
     });
 
-    // 각 그룹 안에서는 문항번호 오름차순 → updated_at 내림차순
     for (const g of arr) {
       g.items.sort((a, b) => {
         const an = a.number ?? 9999;
@@ -286,6 +288,14 @@ export default function ClassifiedListPage() {
     fetchMaterials();
   }
 
+  // ✅ 그룹 토글
+  function toggleGroup(key) {
+    setGroupOpen((prev) => ({
+      ...prev,
+      [key]: !(prev[key] ?? true),
+    }));
+  }
+
   return (
     <div className="ui-page">
       <div className="ui-wrap">
@@ -332,144 +342,164 @@ export default function ClassifiedListPage() {
             ) : groupedMaterials.length === 0 ? (
               <div className="ui-sub">자료가 없습니다.</div>
             ) : (
-              groupedMaterials.map((grp, idx) => (
-                <div key={idx} className="ui-card" style={{ marginBottom: 14 }}>
-                  <div style={{ marginBottom: 6 }}>
-                    <b>
-                      {buildTitle(grp.grade, grp.year, grp.month, null)}
-                    </b>
-                    {!grp.grade && !grp.year && !grp.month && (
-                      <span style={{ marginLeft: 6, color: '#999' }}>(메타 미입력 자료)</span>
-                    )}
-                  </div>
-                  {grp.items.map((m) => (
+              groupedMaterials.map((grp) => {
+                const open = groupOpen[grp.key] ?? true;
+                return (
+                  <div key={grp.key} className="ui-card" style={{ marginBottom: 14 }}>
                     <div
-                      key={m.id}
-                      className="ui-card"
-                      style={{ marginBottom: 6, background: '#fff' }}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
                     >
-                      <div
-                        style={{
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          gap: 12,
-                        }}
-                      >
-                        <div
-                          onClick={() => nav(`/category/recommend/${m.id}`)}
-                          style={{ cursor: 'pointer' }}
-                        >
-                          <b>{m.title || '(제목 없음)'}</b>
-                          <div style={{ fontSize: 13, color: '#5d6b82' }}>
-                            상태: {m.status || '저장됨'} /{' '}
-                            {new Date(m.updated_at).toLocaleString('ko-KR')}
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', gap: 6 }}>
-                          <button className="ui-btn sm" onClick={() => startEditMaterial(m)}>
-                            메타 수정
-                          </button>
-                          <button className="ui-btn danger sm" onClick={() => deleteMaterial(m.id)}>
-                            삭제
-                          </button>
-                        </div>
+                      <div>
+                        <b>{buildTitle(grp.grade, grp.year, grp.month, null)}</b>
+                        {!grp.grade && !grp.year && !grp.month && (
+                          <span style={{ marginLeft: 6, color: '#999' }}>(메타 미입력 자료)</span>
+                        )}
                       </div>
+                      <button className="ui-btn sm" onClick={() => toggleGroup(grp.key)}>
+                        {open ? '접기' : '펼치기'}
+                      </button>
+                    </div>
 
-                      {/* 🔴 이 자료를 수정 중이면 폼 */}
-                      {editingMaterialId === m.id && (
+                    {open &&
+                      grp.items.map((m) => (
                         <div
+                          key={m.id}
                           className="ui-card"
-                          style={{
-                            marginTop: 12,
-                            border: '1px solid #e2e8ff',
-                            background: '#f8f9ff',
-                          }}
+                          style={{ marginTop: 6, background: '#fff' }}
                         >
-                          <div style={{ fontWeight: 700, marginBottom: 8 }}>
-                            메타 수정: {m.title || '(제목 없음)'}
-                          </div>
                           <div
                             style={{
-                              display: 'grid',
-                              gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                              gap: 10,
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 12,
                             }}
                           >
-                            <div>
-                              <div className="ui-sub" style={{ marginBottom: 4 }}>
-                                학년
+                            <div
+                              onClick={() => nav(`/category/recommend/${m.id}`)}
+                              style={{ cursor: 'pointer' }}
+                            >
+                              <b>{m.title || '(제목 없음)'}</b>
+                              <div style={{ fontSize: 13, color: '#5d6b82' }}>
+                                상태: {m.status || '저장됨'} /{' '}
+                                {new Date(m.updated_at).toLocaleString('ko-KR')}
                               </div>
-                              <select
-                                value={editGrade}
-                                onChange={(e) => setEditGrade(e.target.value)}
-                                style={{ width: '100%' }}
+                            </div>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button className="ui-btn sm" onClick={() => startEditMaterial(m)}>
+                                메타 수정
+                              </button>
+                              <button
+                                className="ui-btn danger sm"
+                                onClick={() => deleteMaterial(m.id)}
                               >
-                                <option value="고1">고1</option>
-                                <option value="고2">고2</option>
-                                <option value="고3">고3</option>
-                              </select>
-                            </div>
-                            <div>
-                              <div className="ui-sub" style={{ marginBottom: 4 }}>
-                                연도
-                              </div>
-                              <input
-                                type="number"
-                                value={editYear}
-                                onChange={(e) => setEditYear(e.target.value)}
-                                min={2000}
-                                max={2100}
-                                style={{ width: '100%' }}
-                              />
-                            </div>
-                            <div>
-                              <div className="ui-sub" style={{ marginBottom: 4 }}>
-                                월
-                              </div>
-                              <select
-                                value={editMonth}
-                                onChange={(e) => setEditMonth(e.target.value)}
-                                style={{ width: '100%' }}
-                              >
-                                <option value="">선택</option>
-                                {Array.from({ length: 12 }).map((_, i) => {
-                                  const mm = i + 1;
-                                  return (
-                                    <option key={mm} value={mm}>
-                                      {mm}월
-                                    </option>
-                                  );
-                                })}
-                              </select>
-                            </div>
-                            <div>
-                              <div className="ui-sub" style={{ marginBottom: 4 }}>
-                                문항번호
-                              </div>
-                              <input
-                                type="number"
-                                value={editNumber}
-                                onChange={(e) => setEditNumber(e.target.value)}
-                                min={1}
-                                style={{ width: '100%' }}
-                              />
+                                삭제
+                              </button>
                             </div>
                           </div>
-                          <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
-                            <button className="ui-btn primary sm" onClick={saveMaterialMeta}>
-                              저장
-                            </button>
-                            <button className="ui-btn sm" onClick={() => setEditingMaterialId(null)}>
-                              취소
-                            </button>
-                          </div>
+
+                          {editingMaterialId === m.id && (
+                            <div
+                              className="ui-card"
+                              style={{
+                                marginTop: 12,
+                                border: '1px solid #e2e8ff',
+                                background: '#f8f9ff',
+                              }}
+                            >
+                              <div style={{ fontWeight: 700, marginBottom: 8 }}>
+                                메타 수정: {m.title || '(제목 없음)'}
+                              </div>
+                              <div
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                                  gap: 10,
+                                }}
+                              >
+                                <div>
+                                  <div className="ui-sub" style={{ marginBottom: 4 }}>
+                                    학년
+                                  </div>
+                                  <select
+                                    value={editGrade}
+                                    onChange={(e) => setEditGrade(e.target.value)}
+                                    style={{ width: '100%' }}
+                                  >
+                                    <option value="고1">고1</option>
+                                    <option value="고2">고2</option>
+                                    <option value="고3">고3</option>
+                                  </select>
+                                </div>
+                                <div>
+                                  <div className="ui-sub" style={{ marginBottom: 4 }}>
+                                    연도
+                                  </div>
+                                  <input
+                                    type="number"
+                                    value={editYear}
+                                    onChange={(e) => setEditYear(e.target.value)}
+                                    min={2000}
+                                    max={2100}
+                                    style={{ width: '100%' }}
+                                  />
+                                </div>
+                                <div>
+                                  <div className="ui-sub" style={{ marginBottom: 4 }}>
+                                    월
+                                  </div>
+                                  <select
+                                    value={editMonth}
+                                    onChange={(e) => setEditMonth(e.target.value)}
+                                    style={{ width: '100%' }}
+                                  >
+                                    <option value="">선택</option>
+                                    {Array.from({ length: 12 }).map((_, i) => {
+                                      const mm = i + 1;
+                                      return (
+                                        <option key={mm} value={mm}>
+                                          {mm}월
+                                        </option>
+                                      );
+                                    })}
+                                  </select>
+                                </div>
+                                <div>
+                                  <div className="ui-sub" style={{ marginBottom: 4 }}>
+                                    문항번호
+                                  </div>
+                                  <input
+                                    type="number"
+                                    value={editNumber}
+                                    onChange={(e) => setEditNumber(e.target.value)}
+                                    min={1}
+                                    style={{ width: '100%' }}
+                                  />
+                                </div>
+                              </div>
+                              <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+                                <button className="ui-btn primary sm" onClick={saveMaterialMeta}>
+                                  저장
+                                </button>
+                                <button
+                                  className="ui-btn sm"
+                                  onClick={() => setEditingMaterialId(null)}
+                                >
+                                  취소
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ))
+                      ))}
+                  </div>
+                );
+              })
             )}
           </div>
         )}
