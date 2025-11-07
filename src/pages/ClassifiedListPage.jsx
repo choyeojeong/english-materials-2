@@ -19,9 +19,9 @@ function buildTitle(grade, year, month, number) {
 
 // 학년 정렬용
 const GRADE_ORDER = {
-  '고1': 1,
-  '고2': 2,
-  '고3': 3,
+  고1: 1,
+  고2: 2,
+  고3: 3,
 };
 
 export default function ClassifiedListPage() {
@@ -48,6 +48,9 @@ export default function ClassifiedListPage() {
 
   // 🔴 그룹 접기/펼치기 상태 (자료별 보기용)
   const [groupOpen, setGroupOpen] = useState({});
+
+  // 🔴 복사 상태 표시용
+  const [copiedKey, setCopiedKey] = useState(null);
 
   useEffect(() => {
     if (tab === 'item') fetchMaterials();
@@ -150,10 +153,8 @@ export default function ClassifiedListPage() {
   // ✅ 난이도 뱃지
   function renderDifficultyBadge(code) {
     if (!code) return null;
-    const text =
-      code === 'easy' ? '쉬움' : code === 'normal' ? '보통' : '어려움';
-    const color =
-      code === 'easy' ? '#42b983' : code === 'normal' ? '#3b82f6' : '#ef4444';
+    const text = code === 'easy' ? '쉬움' : code === 'normal' ? '보통' : '어려움';
+    const color = code === 'easy' ? '#42b983' : code === 'normal' ? '#3b82f6' : '#ef4444';
     return (
       <span className="ui-badge" style={{ background: color, color: '#fff', fontWeight: 600 }}>
         {text}
@@ -164,8 +165,7 @@ export default function ClassifiedListPage() {
   // ✅ 자동 저장 - used_in
   function onUsedInChange(pairId, value) {
     setUsedInMap((prev) => ({ ...prev, [pairId]: value }));
-    if (saveTimersRef.current[pairId])
-      clearTimeout(saveTimersRef.current[pairId]);
+    if (saveTimersRef.current[pairId]) clearTimeout(saveTimersRef.current[pairId]);
     saveTimersRef.current[pairId] = setTimeout(async () => {
       await supabase.rpc('material_update_pair_used_in', {
         p_pair_id: pairId,
@@ -177,8 +177,7 @@ export default function ClassifiedListPage() {
   // ✅ 자동 저장 - difficulty
   function onDifficultyChange(pairId, value) {
     setDifficultyMap((prev) => ({ ...prev, [pairId]: value }));
-    if (diffTimersRef.current[pairId])
-      clearTimeout(diffTimersRef.current[pairId]);
+    if (diffTimersRef.current[pairId]) clearTimeout(diffTimersRef.current[pairId]);
     diffTimersRef.current[pairId] = setTimeout(async () => {
       await supabase.rpc('material_update_pair_difficulty', {
         p_pair_id: pairId,
@@ -187,15 +186,14 @@ export default function ClassifiedListPage() {
     }, 600);
   }
 
-  // ✅ 클립보드 복사
-  async function copyText(text) {
+  // ✅ 클립보드 복사 (복사됨 표시)
+  async function copyText(text, key) {
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
-      // 조용히 성공해도 되고
-      // alert('복사되었습니다.');
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 1000);
     } catch (e) {
-      // https 환경 아니거나 권한 없을 때
       alert('복사에 실패했습니다. 브라우저 권한을 확인해주세요.');
       console.error(e);
     }
@@ -236,6 +234,7 @@ export default function ClassifiedListPage() {
     }
 
     const arr = Array.from(map.values());
+    // 그룹 정렬: 연도 ↓, 월 ↓, 학년 순
     arr.sort((a, b) => {
       const ay = Number(a.year) || 0;
       const by = Number(b.year) || 0;
@@ -248,6 +247,7 @@ export default function ClassifiedListPage() {
       return ag - bg;
     });
 
+    // 그룹 안 정렬: 문항번호 ↑, 그다음 최근 수정 ↓
     for (const g of arr) {
       g.items.sort((a, b) => {
         const an = a.number ?? 9999;
@@ -381,11 +381,7 @@ export default function ClassifiedListPage() {
 
                     {open &&
                       grp.items.map((m) => (
-                        <div
-                          key={m.id}
-                          className="ui-card"
-                          style={{ marginTop: 6, background: '#fff' }}
-                        >
+                        <div key={m.id} className="ui-card" style={{ marginTop: 6, background: '#fff' }}>
                           <div
                             style={{
                               display: 'flex',
@@ -408,15 +404,13 @@ export default function ClassifiedListPage() {
                               <button className="ui-btn sm" onClick={() => startEditMaterial(m)}>
                                 메타 수정
                               </button>
-                              <button
-                                className="ui-btn danger sm"
-                                onClick={() => deleteMaterial(m.id)}
-                              >
+                              <button className="ui-btn danger sm" onClick={() => deleteMaterial(m.id)}>
                                 삭제
                               </button>
                             </div>
                           </div>
 
+                          {/* 메타 수정 폼 */}
                           {editingMaterialId === m.id && (
                             <div
                               className="ui-card"
@@ -500,10 +494,7 @@ export default function ClassifiedListPage() {
                                 <button className="ui-btn primary sm" onClick={saveMaterialMeta}>
                                   저장
                                 </button>
-                                <button
-                                  className="ui-btn sm"
-                                  onClick={() => setEditingMaterialId(null)}
-                                >
+                                <button className="ui-btn sm" onClick={() => setEditingMaterialId(null)}>
                                   취소
                                 </button>
                               </div>
@@ -544,7 +535,11 @@ export default function ClassifiedListPage() {
                 return (
                   <div key={cat.category_id} className="ui-card" style={{ marginBottom: 10 }}>
                     <div
-                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <b>{cat.category_name}</b>
@@ -560,21 +555,18 @@ export default function ClassifiedListPage() {
                         {cat.items.map((it) => (
                           <div key={it.pair_id} className="ui-card" style={{ marginBottom: 8 }}>
                             {/* 영어 문장 + 복사 */}
-                            <div
-                              style={{
-                                display: 'flex',
-                                alignItems: 'flex-start',
-                                gap: 6,
-                              }}
-                            >
+                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
                               <div style={{ fontWeight: 700, flex: 1 }}>{it.en_sentence}</div>
                               <button
                                 className="ui-btn sm"
-                                onClick={() => copyText(it.en_sentence)}
+                                onClick={() => copyText(it.en_sentence, `en-${it.pair_id}`)}
                                 title="영어 문장 복사"
                               >
                                 복사
                               </button>
+                              {copiedKey === `en-${it.pair_id}` && (
+                                <span style={{ fontSize: 12, color: '#10b981' }}>복사됨</span>
+                              )}
                             </div>
                             {/* 한국어 문장 + 복사 */}
                             <div
@@ -588,11 +580,14 @@ export default function ClassifiedListPage() {
                               <div style={{ color: '#4b5563', flex: 1 }}>{it.ko_sentence}</div>
                               <button
                                 className="ui-btn sm"
-                                onClick={() => copyText(it.ko_sentence)}
+                                onClick={() => copyText(it.ko_sentence, `ko-${it.pair_id}`)}
                                 title="한국어 문장 복사"
                               >
                                 복사
                               </button>
+                              {copiedKey === `ko-${it.pair_id}` && (
+                                <span style={{ fontSize: 12, color: '#10b981' }}>복사됨</span>
+                              )}
                             </div>
 
                             <div
