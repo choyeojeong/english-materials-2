@@ -5,6 +5,7 @@ import DashboardButton from '../components/DashboardButton';
 import '../styles/ui.css';
 
 const STORAGE_KEY = 'classify_start_draft_v1';
+const FINISHED_KEY = 'classify_start_finished_v1';
 
 function splitIntoSentences(raw) {
   // 1) 줄바꿈 우선
@@ -35,7 +36,6 @@ function buildTitle(grade, year, month, number) {
   const y = (year || '').toString().trim();
   const m = (month || '').toString().trim();
   const n = (number || '').toString().trim();
-  // 예: "2024년 고1 9월 모의고사 20번"
   const base = [y && `${y}년`, g, m && `${m}월`, '모의고사']
     .filter(Boolean)
     .join(' ');
@@ -48,11 +48,11 @@ function normalizeBlockText(raw) {
     .split(/\r?\n/)
     .map((line) =>
       line
-        .replace(/\s+/g, ' ') // 줄 안쪽 여러 공백 → 1칸
+        .replace(/\s+/g, ' ')
         .trim()
     )
-    .filter(Boolean) // 빈 줄 제거
-    .join('\n'); // 다시 줄로 합치기
+    .filter(Boolean)
+    .join('\n');
 }
 
 export default function ClassifyStartPage() {
@@ -75,6 +75,14 @@ export default function ClassifyStartPage() {
   // 처음 들어올 때 로컬 저장된 초안 불러오기
   useEffect(() => {
     try {
+      // ✅ 바로 직전에 "분류 완료"를 했다면 초안은 안 불러오고, 완료 플래그만 지운다
+      const justFinished = localStorage.getItem(FINISHED_KEY);
+      if (justFinished === '1') {
+        localStorage.removeItem(FINISHED_KEY);
+        // 여기서 return 하면 아래 초안 로딩은 안 함
+        return;
+      }
+
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
@@ -146,21 +154,19 @@ export default function ClassifyStartPage() {
       return;
     }
 
-    // 1) 문장 존재 여부 체크
     if (!hasAny) {
       alert('분리할 문장이 없습니다. 왼쪽(영문) 입력 칸을 채워주세요.');
       return;
     }
 
     const meta = {
-      grade, // '고1' | '고2' | '고3'
+      grade,
       year: year ? Number(year) : null,
       month: month ? Number(month) : null,
       number: number ? Number(number) : null,
       title: buildTitle(grade, year, month, number),
     };
 
-    // EN/KO 길이가 달라도 EN 기준으로 페어링 (KO 없으면 빈칸)
     const pairs = enList.map((en, i) => ({
       en,
       ko: koList[i] ?? '',
@@ -170,10 +176,14 @@ export default function ClassifyStartPage() {
       order_index: i,
     }));
 
+    // ✅ 여기서 자동 저장된 초안은 지워버린다
+    localStorage.removeItem(STORAGE_KEY);
+    // ✅ 그리고 "방금 끝났어" 플래그를 잠깐 남겨둔다
+    localStorage.setItem(FINISHED_KEY, '1');
+
     nav('/category/start/review', { state: { meta, pairs } });
   };
 
-  // 공백 정리 핸들러
   const handleNormalizeEN = () => {
     setRawEN((prev) => normalizeBlockText(prev));
   };
@@ -209,7 +219,7 @@ export default function ClassifyStartPage() {
 
         {/* 본문 카드 */}
         <div className="ui-card">
-          {/* 메타: 학년 / 연도 / 월 / 문항번호 */}
+          {/* 메타 입력 */}
           <div
             className="meta-grid"
             style={{
@@ -305,7 +315,7 @@ export default function ClassifyStartPage() {
             </div>
           </div>
 
-          {/* 본문 입력: 영문 / 한국어 해석 */}
+          {/* 본문 입력 */}
           <div
             className="dual-grid"
             style={{
