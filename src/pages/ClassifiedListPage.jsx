@@ -64,7 +64,7 @@ export default function ClassifiedListPage() {
       .from('materials')
       .select('id, title, status, updated_at, grade, year, month, number')
       .order('updated_at', { ascending: false })
-      .limit(200);
+      .limit(1000);
     if (!error) setRows(data || []);
     setLoading(false);
   }
