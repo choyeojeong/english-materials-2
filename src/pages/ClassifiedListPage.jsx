@@ -32,8 +32,14 @@ export default function ClassifiedListPage() {
   const [rows, setRows] = useState([]);
   const [catRows, setCatRows] = useState([]);
   const [loading, setLoading] = useState(false);
+
+  // 문장별 보기 검색(카테고리명)
   const [q, setQ] = useState('');
   const [expanded, setExpanded] = useState({});
+
+  // 자료별 보기 검색(학년/연도/월/제목/번호 통합 검색)
+  const [itemQ, setItemQ] = useState('');
+
   const [usedInMap, setUsedInMap] = useState({});
   const [difficultyMap, setDifficultyMap] = useState({});
   const saveTimersRef = useRef({});
@@ -213,10 +219,31 @@ export default function ClassifiedListPage() {
     return Array.from(map.values()).sort((a, b) => b.items.length - a.items.length);
   }, [catRows, q]);
 
-  // ✅ 자료별 보기용: 학년+연도+월로 그룹화
+  // ✅ 자료별 보기용: 학년+연도+월로 그룹화 (+ 자유 검색)
   const groupedMaterials = useMemo(() => {
+    const qn = itemQ.trim().toLowerCase();
+    const tokens = qn ? qn.split(/\s+/) : [];
+
+    // 1) 먼저 자료 단위 필터링
+    const filteredRows = rows.filter((m) => {
+      if (!tokens.length) return true;
+
+      const title = (m.title || '').toLowerCase();
+      const gradeStr = (m.grade || '').toLowerCase();
+      const yearStr = m.year != null ? String(m.year) : '';
+      const monthStr = m.month != null ? String(m.month) : '';
+      const numberStr = m.number != null ? String(m.number) : '';
+      const monthLabel = monthStr ? `${monthStr}월` : '';
+
+      const joined = [title, gradeStr, yearStr, monthStr, monthLabel, numberStr].join(' ');
+
+      // 모든 토큰이 joined 안에 포함되면 통과 (AND 조건)
+      return tokens.every((tok) => joined.includes(tok));
+    });
+
+    // 2) 그룹핑
     const map = new Map();
-    for (const m of rows) {
+    for (const m of filteredRows) {
       const g = m.grade || '기타';
       const y = m.year || '';
       const mm = m.month || '';
@@ -258,7 +285,7 @@ export default function ClassifiedListPage() {
     }
 
     return arr;
-  }, [rows]);
+  }, [rows, itemQ]);
 
   // 🔴 메타 수정 시작
   function startEditMaterial(m) {
@@ -302,11 +329,11 @@ export default function ClassifiedListPage() {
     fetchMaterials();
   }
 
-  // ✅ 그룹 토글
+  // ✅ 그룹 토글 (기본: 접힘 상태)
   function toggleGroup(key) {
     setGroupOpen((prev) => ({
       ...prev,
-      [key]: !(prev[key] ?? true),
+      [key]: !(prev[key] ?? false),
     }));
   }
 
@@ -351,13 +378,30 @@ export default function ClassifiedListPage() {
         {/* ✅ 자료별 보기 */}
         {tab === 'item' && (
           <div className="ui-card" style={{ marginTop: 12 }}>
+            {/* 상단 검색창 (학년/연도/월/제목/번호 통합검색) */}
+            <div style={{ marginBottom: 10 }}>
+              <input
+                value={itemQ}
+                onChange={(e) => setItemQ(e.target.value)}
+                placeholder="학년/연도/월/제목/번호 검색 (예: 고2 2024 6월 3번)"
+                style={{
+                  width: '100%',
+                  padding: '8px 10px',
+                  border: '1px solid #e3e8f2',
+                  borderRadius: 8,
+                  fontSize: 13,
+                }}
+              />
+            </div>
+
             {loading ? (
               <div className="ui-sub">불러오는 중...</div>
             ) : groupedMaterials.length === 0 ? (
               <div className="ui-sub">자료가 없습니다.</div>
             ) : (
               groupedMaterials.map((grp) => {
-                const open = groupOpen[grp.key] ?? true;
+                // 🔹 기본은 접힌 상태
+                const open = groupOpen[grp.key] ?? false;
                 return (
                   <div key={grp.key} className="ui-card" style={{ marginBottom: 14 }}>
                     <div
@@ -381,7 +425,11 @@ export default function ClassifiedListPage() {
 
                     {open &&
                       grp.items.map((m) => (
-                        <div key={m.id} className="ui-card" style={{ marginTop: 6, background: '#fff' }}>
+                        <div
+                          key={m.id}
+                          className="ui-card"
+                          style={{ marginTop: 6, background: '#fff' }}
+                        >
                           <div
                             style={{
                               display: 'flex',
@@ -404,7 +452,10 @@ export default function ClassifiedListPage() {
                               <button className="ui-btn sm" onClick={() => startEditMaterial(m)}>
                                 메타 수정
                               </button>
-                              <button className="ui-btn danger sm" onClick={() => deleteMaterial(m.id)}>
+                              <button
+                                className="ui-btn danger sm"
+                                onClick={() => deleteMaterial(m.id)}
+                              >
                                 삭제
                               </button>
                             </div>
@@ -494,7 +545,10 @@ export default function ClassifiedListPage() {
                                 <button className="ui-btn primary sm" onClick={saveMaterialMeta}>
                                   저장
                                 </button>
-                                <button className="ui-btn sm" onClick={() => setEditingMaterialId(null)}>
+                                <button
+                                  className="ui-btn sm"
+                                  onClick={() => setEditingMaterialId(null)}
+                                >
                                   취소
                                 </button>
                               </div>
@@ -545,7 +599,10 @@ export default function ClassifiedListPage() {
                         <b>{cat.category_name}</b>
                         <span className="ui-badge">{cat.items.length}문장</span>
                       </div>
-                      <button className="ui-btn sm" onClick={() => toggleExpand(cat.category_id)}>
+                      <button
+                        className="ui-btn sm"
+                        onClick={() => toggleExpand(cat.category_id)}
+                      >
                         {open ? '접기' : '펼치기'}
                       </button>
                     </div>
