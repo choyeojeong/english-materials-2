@@ -206,16 +206,30 @@ export default function ClassifiedListPage() {
   }
 
   // ✅ 문장 그룹화 (문장별 보기 탭)
+  // ✅ 개선: 카테고리명뿐 아니라 en_sentence/ko_sentence에도 검색 적용
   const groupedCats = useMemo(() => {
     const qn = q.trim().toLowerCase();
     const map = new Map();
+
     for (const r of catRows) {
       const cid = r.category_id ?? 'UNCAT';
       const cname = r.category_name ?? '(미분류)';
-      if (qn && !cname.toLowerCase().includes(qn)) continue;
+
+      // 🔥 검색 로직 개선 (기존 기능은 그대로, 필터만 확장)
+      if (qn) {
+        const cnameL = (cname || '').toLowerCase();
+        const enL = (r.en_sentence || '').toLowerCase();
+        const koL = (r.ko_sentence || '').toLowerCase();
+
+        // 검색어가 카테고리명 OR 영어문장 OR 한국어문장 어디든 포함되면 통과
+        // 예) "tend to" → 문장에 tend to가 들어가면 다 뜸
+        if (!cnameL.includes(qn) && !enL.includes(qn) && !koL.includes(qn)) continue;
+      }
+
       if (!map.has(cid)) map.set(cid, { category_id: cid, category_name: cname, items: [] });
       map.get(cid).items.push(r);
     }
+
     return Array.from(map.values()).sort((a, b) => b.items.length - a.items.length);
   }, [catRows, q]);
 
@@ -599,16 +613,15 @@ export default function ClassifiedListPage() {
                         <b>{cat.category_name}</b>
                         <span className="ui-badge">{cat.items.length}문장</span>
                       </div>
-                      <button
-                        className="ui-btn sm"
-                        onClick={() => toggleExpand(cat.category_id)}
-                      >
+                      <button className="ui-btn sm" onClick={() => toggleExpand(cat.category_id)}>
                         {open ? '접기' : '펼치기'}
                       </button>
                     </div>
 
                     {open && (
-                      <div style={{ marginTop: 8, borderLeft: '3px solid #eef3ff', paddingLeft: 8 }}>
+                      <div
+                        style={{ marginTop: 8, borderLeft: '3px solid #eef3ff', paddingLeft: 8 }}
+                      >
                         {cat.items.map((it) => (
                           <div key={it.pair_id} className="ui-card" style={{ marginBottom: 8 }}>
                             {/* 영어 문장 + 복사 */}
@@ -647,9 +660,7 @@ export default function ClassifiedListPage() {
                               )}
                             </div>
 
-                            <div
-                              style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6 }}
-                            >
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6 }}>
                               <label style={{ fontSize: 12, color: '#555' }}>난이도:</label>
                               <select
                                 value={difficultyMap[it.pair_id] ?? ''}
@@ -662,16 +673,10 @@ export default function ClassifiedListPage() {
                               </select>
                               {renderDifficultyBadge(difficultyMap[it.pair_id])}
                               <span style={{ fontSize: 13 }}>출처: {it.material_title ?? '-'}</span>
-                              <button
-                                className="ui-btn sm"
-                                onClick={() => nav(`/category/recommend/${it.material_id}`)}
-                              >
+                              <button className="ui-btn sm" onClick={() => nav(`/category/recommend/${it.material_id}`)}>
                                 이동
                               </button>
-                              <button
-                                className="ui-btn danger sm"
-                                onClick={() => deleteSentence(it.pair_id)}
-                              >
+                              <button className="ui-btn danger sm" onClick={() => deleteSentence(it.pair_id)}>
                                 삭제
                               </button>
                             </div>
