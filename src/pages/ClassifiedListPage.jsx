@@ -24,6 +24,21 @@ const GRADE_ORDER = {
   고3: 3,
 };
 
+// ✅ 카테고리 경로 라벨 만들기 (부모→자식)
+function buildPathLabel(categoryId, metaById) {
+  if (!categoryId) return '';
+  const names = [];
+  let cur = categoryId;
+  const guard = new Set(); // 순환 방지
+  while (cur && metaById[cur] && !guard.has(cur)) {
+    guard.add(cur);
+    const node = metaById[cur];
+    if (node?.name) names.push(node.name);
+    cur = node?.parent_id ?? null;
+  }
+  return names.reverse().join(' > ');
+}
+
 export default function ClassifiedListPage() {
   const nav = useNavigate();
 
@@ -79,15 +94,42 @@ export default function ClassifiedListPage() {
   async function fetchByCategory() {
     setLoading(true);
 
+    // 1) 카테고리 메타 전체 로드 (경로 라벨 구성용)
+    //    - 깊은 트리라도 parent_id 체인만 타면 됨
+    //    - 컬럼 최소화
+    const { data: catMeta, error: catErr } = await supabase
+      .from('category_nodes')
+      .select('id, name, parent_id')
+      .limit(50000);
+    if (catErr) {
+      console.warn('[category_nodes] load failed:', catErr.message);
+    }
+    const metaById = {};
+    (catMeta ?? []).forEach((n) => {
+      metaById[n.id] = { id: n.id, name: n.name, parent_id: n.parent_id };
+    });
+
+    // 2) 분류된 문장(뷰)
     const { data: viewData } = await supabase
       .from('v_category_pair_sentences')
       .select('*')
       .limit(5000);
 
-    const categorized = (viewData ?? []).filter((r) =>
+    const categorized0 = (viewData ?? []).filter((r) =>
       status === 'done' ? r.material_status === 'done' : true
     );
 
+    // ✅ 여기서 category_path_label을 프론트에서 채워 넣는다
+    const categorized = categorized0.map((r) => {
+      const cid = r.category_id ?? null;
+      const path = cid ? buildPathLabel(cid, metaById) : '';
+      return {
+        ...r,
+        category_path_label: path || r.category_name || '(이름 없음)',
+      };
+    });
+
+    // 3) 미분류 문장 (left join null)
     let uncReq = supabase
       .from('material_pairs')
       .select(
@@ -104,6 +146,7 @@ export default function ClassifiedListPage() {
     const uncategorized = (uncData ?? []).map((u) => ({
       category_id: null,
       category_name: '(미분류)',
+      category_path_label: '(미분류)',
       pair_id: u.id,
       material_id: u.material_id,
       material_title: u.materials?.title ?? null,
@@ -207,13 +250,14 @@ export default function ClassifiedListPage() {
 
   // ✅ 문장 그룹화 (문장별 보기 탭)
   // ✅ 개선: 카테고리명뿐 아니라 en_sentence/ko_sentence에도 검색 적용
+  // ✅ 추가: category_name 대신 category_path_label로 그룹핑 (경로가 같아야 같은 그룹)
   const groupedCats = useMemo(() => {
     const qn = q.trim().toLowerCase();
     const map = new Map();
 
     for (const r of catRows) {
       const cid = r.category_id ?? 'UNCAT';
-      const cname = r.category_name ?? '(미분류)';
+      const cname = r.category_path_label ?? r.category_name ?? '(미분류)';
 
       // 🔥 검색 로직 개선 (기존 기능은 그대로, 필터만 확장)
       if (qn) {
@@ -221,8 +265,6 @@ export default function ClassifiedListPage() {
         const enL = (r.en_sentence || '').toLowerCase();
         const koL = (r.ko_sentence || '').toLowerCase();
 
-        // 검색어가 카테고리명 OR 영어문장 OR 한국어문장 어디든 포함되면 통과
-        // 예) "tend to" → 문장에 tend to가 들어가면 다 뜸
         if (!cnameL.includes(qn) && !enL.includes(qn) && !koL.includes(qn)) continue;
       }
 
@@ -250,8 +292,6 @@ export default function ClassifiedListPage() {
       const monthLabel = monthStr ? `${monthStr}월` : '';
 
       const joined = [title, gradeStr, yearStr, monthStr, monthLabel, numberStr].join(' ');
-
-      // 모든 토큰이 joined 안에 포함되면 통과 (AND 조건)
       return tokens.every((tok) => joined.includes(tok));
     });
 
@@ -414,7 +454,6 @@ export default function ClassifiedListPage() {
               <div className="ui-sub">자료가 없습니다.</div>
             ) : (
               groupedMaterials.map((grp) => {
-                // 🔹 기본은 접힌 상태
                 const open = groupOpen[grp.key] ?? false;
                 return (
                   <div key={grp.key} className="ui-card" style={{ marginBottom: 14 }}>
@@ -584,7 +623,7 @@ export default function ClassifiedListPage() {
               <input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="분류(카테고리) 이름 검색"
+                placeholder="분류(카테고리) 이름 / 문장 검색"
                 style={{
                   width: '100%',
                   padding: '8px 10px',
@@ -593,6 +632,7 @@ export default function ClassifiedListPage() {
                 }}
               />
             </div>
+
             {loading ? (
               <div className="ui-sub">불러오는 중...</div>
             ) : groupedCats.length === 0 ? (
@@ -610,6 +650,7 @@ export default function ClassifiedListPage() {
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {/* ✅ 이제 전체 경로 라벨 표시 */}
                         <b>{cat.category_name}</b>
                         <span className="ui-badge">{cat.items.length}문장</span>
                       </div>
@@ -619,25 +660,28 @@ export default function ClassifiedListPage() {
                     </div>
 
                     {open && (
-                      <div
-                        style={{ marginTop: 8, borderLeft: '3px solid #eef3ff', paddingLeft: 8 }}
-                      >
+                      <div style={{ marginTop: 8, borderLeft: '3px solid #eef3ff', paddingLeft: 8 }}>
                         {cat.items.map((it) => (
-                          <div key={it.pair_id} className="ui-card" style={{ marginBottom: 8 }}>
+                          <div
+                            key={`${it.category_id ?? 'UNCAT'}-${it.pair_id}`}
+                            className="ui-card"
+                            style={{ marginBottom: 8 }}
+                          >
                             {/* 영어 문장 + 복사 */}
                             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
                               <div style={{ fontWeight: 700, flex: 1 }}>{it.en_sentence}</div>
                               <button
                                 className="ui-btn sm"
-                                onClick={() => copyText(it.en_sentence, `en-${it.pair_id}`)}
+                                onClick={() => copyText(it.en_sentence, `en-${it.category_id}-${it.pair_id}`)}
                                 title="영어 문장 복사"
                               >
                                 복사
                               </button>
-                              {copiedKey === `en-${it.pair_id}` && (
+                              {copiedKey === `en-${it.category_id}-${it.pair_id}` && (
                                 <span style={{ fontSize: 12, color: '#10b981' }}>복사됨</span>
                               )}
                             </div>
+
                             {/* 한국어 문장 + 복사 */}
                             <div
                               style={{
@@ -650,12 +694,12 @@ export default function ClassifiedListPage() {
                               <div style={{ color: '#4b5563', flex: 1 }}>{it.ko_sentence}</div>
                               <button
                                 className="ui-btn sm"
-                                onClick={() => copyText(it.ko_sentence, `ko-${it.pair_id}`)}
+                                onClick={() => copyText(it.ko_sentence, `ko-${it.category_id}-${it.pair_id}`)}
                                 title="한국어 문장 복사"
                               >
                                 복사
                               </button>
-                              {copiedKey === `ko-${it.pair_id}` && (
+                              {copiedKey === `ko-${it.category_id}-${it.pair_id}` && (
                                 <span style={{ fontSize: 12, color: '#10b981' }}>복사됨</span>
                               )}
                             </div>
@@ -673,10 +717,16 @@ export default function ClassifiedListPage() {
                               </select>
                               {renderDifficultyBadge(difficultyMap[it.pair_id])}
                               <span style={{ fontSize: 13 }}>출처: {it.material_title ?? '-'}</span>
-                              <button className="ui-btn sm" onClick={() => nav(`/category/recommend/${it.material_id}`)}>
+                              <button
+                                className="ui-btn sm"
+                                onClick={() => nav(`/category/recommend/${it.material_id}`)}
+                              >
                                 이동
                               </button>
-                              <button className="ui-btn danger sm" onClick={() => deleteSentence(it.pair_id)}>
+                              <button
+                                className="ui-btn danger sm"
+                                onClick={() => deleteSentence(it.pair_id)}
+                              >
                                 삭제
                               </button>
                             </div>
