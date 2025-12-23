@@ -33,10 +33,7 @@ function buildPathLabel(categoryId, metaById) {
   return names.reverse().join(' > ');
 }
 
-/**
- * ✅ 공통: 페이지네이션으로 "끝까지" 가져오기
- * - Supabase는 limit/range로 끊어 읽어야 안정적
- */
+// ✅ 페이지네이션으로 끝까지 가져오기
 async function fetchAllPaged(makeQuery, pageSize = 1000, maxPages = 200) {
   const out = [];
   for (let page = 0; page < maxPages; page++) {
@@ -46,7 +43,7 @@ async function fetchAllPaged(makeQuery, pageSize = 1000, maxPages = 200) {
     if (error) throw error;
     const chunk = data ?? [];
     out.push(...chunk);
-    if (chunk.length < pageSize) break; // 마지막 페이지
+    if (chunk.length < pageSize) break;
   }
   return out;
 }
@@ -60,7 +57,7 @@ export default function ClassifiedListPage() {
   const [catRows, setCatRows] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // 문장별 보기 검색(카테고리명/문장)
+  // 문장별 보기 검색
   const [q, setQ] = useState('');
   const [expanded, setExpanded] = useState({});
 
@@ -91,7 +88,6 @@ export default function ClassifiedListPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, status]);
 
-  // ✅ 자료 불러오기
   async function fetchMaterials() {
     setLoading(true);
     try {
@@ -114,17 +110,20 @@ export default function ClassifiedListPage() {
   }
 
   /**
-   * ✅ 문장별 보기 로딩 (핵심)
-   * - category_nodes / material_pairs / material_pair_categories를 "끝까지" 로드
-   * - 미분류 = 매핑 0개인 pair만
-   * - category_nodes가 안 붙는 건 (삭제된 분류)로 표시 (미분류로 보내지 않음)
+   * ✅ 핵심 수정:
+   * - pair_id 비교/Set/Map 키를 전부 String(...) 로 통일
+   * - 그래서 bigint가 number/string 섞여와도 "미분류 오탐"이 사라짐
    */
   async function fetchByCategory() {
     setLoading(true);
     try {
       // 1) category_nodes 전부
       const catMeta = await fetchAllPaged(
-        () => supabase.from('category_nodes').select('id, name, parent_id').order('created_at', { ascending: true }),
+        () =>
+          supabase
+            .from('category_nodes')
+            .select('id, name, parent_id')
+            .order('created_at', { ascending: true }),
         2000,
         50
       );
@@ -139,10 +138,8 @@ export default function ClassifiedListPage() {
         () => {
           let q = supabase
             .from('material_pairs')
-            .select(
-              'id, en_sentence, ko_sentence, used_in, difficulty, material_id, materials!inner(title,status)'
-            )
-            .order('id', { ascending: true }); // 페이지네이션 안정용
+            .select('id, en_sentence, ko_sentence, used_in, difficulty, material_id, materials!inner(title,status)')
+            .order('id', { ascending: true }); // paging 안정
           if (status === 'done') q = q.eq('materials.status', 'done');
           return q;
         },
@@ -150,12 +147,18 @@ export default function ClassifiedListPage() {
         200
       );
 
-      const pairIds = (pairs ?? []).map((p) => p.id).filter(Boolean);
+      // ✅ id 키는 문자열로 통일
+      const pairIds = (pairs ?? []).map((p) => String(p.id)).filter(Boolean);
 
+      // pairMap도 문자열 키
       const pairMap = {};
       for (const p of pairs ?? []) {
-        pairMap[p.id] = {
+        const pidKey = String(p.id);
+        pairMap[pidKey] = {
+          // RPC 호출용으로는 원래 id 그대로도 남겨둠
           pair_id: p.id,
+          pair_id_key: pidKey,
+
           material_id: p.material_id,
           material_title: p.materials?.title ?? null,
           material_status: p.materials?.status ?? null,
@@ -166,12 +169,14 @@ export default function ClassifiedListPage() {
         };
       }
 
-      // 3) material_pair_categories 전부(해당 pairId 대상)
-      //    ⚠️ in()도 내부적으로 제한/잘림 위험이 있으니 chunk로 나눠서 "끝까지"
+      // 3) material_pair_categories(해당 pairId 대상) 전부 — chunk in()
       const mappingsAll = [];
-      const CHUNK = 500; // in() 안정용
+      const CHUNK = 500;
       for (let i = 0; i < pairIds.length; i += CHUNK) {
         const slice = pairIds.slice(i, i + CHUNK);
+
+        // ⚠️ pair_id 타입이 bigint(number/string) 섞여도 in()에는 문자열로 넣어도 잘 매칭됨(대부분의 경우)
+        // 만약 프로젝트에서 강제로 실패하면 slice를 Number로 바꿔야 하는데, 그땐 bigint 안전성 이슈가 생김.
         const mapChunk = await fetchAllPaged(
           () =>
             supabase
@@ -182,19 +187,21 @@ export default function ClassifiedListPage() {
           2000,
           50
         );
+
         mappingsAll.push(...(mapChunk ?? []));
       }
 
-      const hasAnyCategory = new Set();
+      const hasAnyCategory = new Set(); // ✅ 문자열 키만 넣기
       const categorized = [];
 
       for (const m of mappingsAll) {
-        const pid = m?.pair_id;
+        const pidKey = String(m?.pair_id);
         const cid = m?.category_id;
-        if (!pid) continue;
 
-        hasAnyCategory.add(pid);
-        const base = pairMap[pid];
+        if (!pidKey) continue;
+        hasAnyCategory.add(pidKey);
+
+        const base = pairMap[pidKey];
         if (!base) continue;
 
         const path =
@@ -208,13 +215,14 @@ export default function ClassifiedListPage() {
         });
       }
 
-      // 4) 미분류 = 매핑 0개
+      // 4) 미분류 = 매핑 0개 (문자열 키로 비교)
       const uncategorized = [];
       for (const p of pairs ?? []) {
-        if (!p?.id) continue;
-        if (hasAnyCategory.has(p.id)) continue;
+        const pidKey = String(p.id);
+        if (!pidKey) continue;
+        if (hasAnyCategory.has(pidKey)) continue;
 
-        const base = pairMap[p.id];
+        const base = pairMap[pidKey];
         if (!base) continue;
 
         uncategorized.push({
@@ -231,8 +239,10 @@ export default function ClassifiedListPage() {
       const nextUsed = {};
       const nextDiff = {};
       for (const r of merged) {
-        nextUsed[r.pair_id] = r.used_in ?? '';
-        nextDiff[r.pair_id] = r.difficulty ?? '';
+        // ✅ 여기서도 key로 통일하면 안전
+        const k = String(r.pair_id);
+        nextUsed[k] = r.used_in ?? '';
+        nextDiff[k] = r.difficulty ?? '';
       }
       setUsedInMap(nextUsed);
       setDifficultyMap(nextDiff);
@@ -244,7 +254,6 @@ export default function ClassifiedListPage() {
     }
   }
 
-  // ✅ 자료 삭제
   async function deleteMaterial(id) {
     if (!window.confirm('이 자료를 정말 삭제하시겠습니까?')) return;
     const { error } = await supabase.from('materials').delete().eq('id', id);
@@ -256,7 +265,6 @@ export default function ClassifiedListPage() {
     }
   }
 
-  // ✅ 문장 삭제
   async function deleteSentence(pairId) {
     if (!window.confirm('이 문장을 정말 삭제하시겠습니까?')) return;
     const { error } = await supabase.from('material_pairs').delete().eq('id', pairId);
@@ -267,12 +275,10 @@ export default function ClassifiedListPage() {
     }
   }
 
-  // ✅ 문장별 보기 펼치기
   function toggleExpand(catId) {
     setExpanded((p) => ({ ...p, [catId]: !p[catId] }));
   }
 
-  // ✅ 난이도 뱃지
   function renderDifficultyBadge(code) {
     if (!code) return null;
     const text = code === 'easy' ? '쉬움' : code === 'normal' ? '보통' : '어려움';
@@ -284,11 +290,11 @@ export default function ClassifiedListPage() {
     );
   }
 
-  // ✅ 자동 저장 - used_in
   function onUsedInChange(pairId, value) {
-    setUsedInMap((prev) => ({ ...prev, [pairId]: value }));
-    if (saveTimersRef.current[pairId]) clearTimeout(saveTimersRef.current[pairId]);
-    saveTimersRef.current[pairId] = setTimeout(async () => {
+    const key = String(pairId);
+    setUsedInMap((prev) => ({ ...prev, [key]: value }));
+    if (saveTimersRef.current[key]) clearTimeout(saveTimersRef.current[key]);
+    saveTimersRef.current[key] = setTimeout(async () => {
       await supabase.rpc('material_update_pair_used_in', {
         p_pair_id: pairId,
         p_used_in: value?.trim() || null,
@@ -296,11 +302,11 @@ export default function ClassifiedListPage() {
     }, 600);
   }
 
-  // ✅ 자동 저장 - difficulty
   function onDifficultyChange(pairId, value) {
-    setDifficultyMap((prev) => ({ ...prev, [pairId]: value }));
-    if (diffTimersRef.current[pairId]) clearTimeout(diffTimersRef.current[pairId]);
-    diffTimersRef.current[pairId] = setTimeout(async () => {
+    const key = String(pairId);
+    setDifficultyMap((prev) => ({ ...prev, [key]: value }));
+    if (diffTimersRef.current[key]) clearTimeout(diffTimersRef.current[key]);
+    diffTimersRef.current[key] = setTimeout(async () => {
       await supabase.rpc('material_update_pair_difficulty', {
         p_pair_id: pairId,
         p_difficulty: value || null,
@@ -308,7 +314,6 @@ export default function ClassifiedListPage() {
     }, 600);
   }
 
-  // ✅ 클립보드 복사
   async function copyText(text, key) {
     if (!text) return;
     try {
@@ -321,7 +326,6 @@ export default function ClassifiedListPage() {
     }
   }
 
-  // ✅ 문장 그룹화(문장별 보기)
   const groupedCats = useMemo(() => {
     const qn = q.trim().toLowerCase();
     const map = new Map();
@@ -344,7 +348,6 @@ export default function ClassifiedListPage() {
     return Array.from(map.values()).sort((a, b) => b.items.length - a.items.length);
   }, [catRows, q]);
 
-  // ✅ 자료별 보기 그룹화
   const groupedMaterials = useMemo(() => {
     const qn = itemQ.trim().toLowerCase();
     const tokens = qn ? qn.split(/\s+/) : [];
@@ -483,9 +486,6 @@ export default function ClassifiedListPage() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                       <div>
                         <b>{buildTitle(grp.grade, grp.year, grp.month, null)}</b>
-                        {!grp.grade && !grp.year && !grp.month && (
-                          <span style={{ marginLeft: 6, color: '#999' }}>(메타 미입력 자료)</span>
-                        )}
                       </div>
                       <button className="ui-btn sm" onClick={() => toggleGroup(grp.key)}>
                         {open ? '접기' : '펼치기'}
@@ -587,36 +587,39 @@ export default function ClassifiedListPage() {
                     {open && (
                       <div style={{ marginTop: 8, borderLeft: '3px solid #eef3ff', paddingLeft: 8 }}>
                         {cat.items.map((it) => (
-                          <div key={`${it.category_id ?? 'UNCAT'}-${it.pair_id}`} className="ui-card" style={{ marginBottom: 8 }}>
+                          <div key={`${it.category_id ?? 'UNCAT'}-${String(it.pair_id)}`} className="ui-card" style={{ marginBottom: 8 }}>
                             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
                               <div style={{ fontWeight: 700, flex: 1 }}>{it.en_sentence}</div>
-                              <button className="ui-btn sm" onClick={() => copyText(it.en_sentence, `en-${it.category_id}-${it.pair_id}`)}>
+                              <button className="ui-btn sm" onClick={() => copyText(it.en_sentence, `en-${it.category_id}-${String(it.pair_id)}`)}>
                                 복사
                               </button>
-                              {copiedKey === `en-${it.category_id}-${it.pair_id}` && (
+                              {copiedKey === `en-${it.category_id}-${String(it.pair_id)}` && (
                                 <span style={{ fontSize: 12, color: '#10b981' }}>복사됨</span>
                               )}
                             </div>
 
                             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 4 }}>
                               <div style={{ color: '#4b5563', flex: 1 }}>{it.ko_sentence}</div>
-                              <button className="ui-btn sm" onClick={() => copyText(it.ko_sentence, `ko-${it.category_id}-${it.pair_id}`)}>
+                              <button className="ui-btn sm" onClick={() => copyText(it.ko_sentence, `ko-${it.category_id}-${String(it.pair_id)}`)}>
                                 복사
                               </button>
-                              {copiedKey === `ko-${it.category_id}-${it.pair_id}` && (
+                              {copiedKey === `ko-${it.category_id}-${String(it.pair_id)}` && (
                                 <span style={{ fontSize: 12, color: '#10b981' }}>복사됨</span>
                               )}
                             </div>
 
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6 }}>
                               <label style={{ fontSize: 12, color: '#555' }}>난이도:</label>
-                              <select value={difficultyMap[it.pair_id] ?? ''} onChange={(e) => onDifficultyChange(it.pair_id, e.target.value)}>
+                              <select
+                                value={difficultyMap[String(it.pair_id)] ?? ''}
+                                onChange={(e) => onDifficultyChange(it.pair_id, e.target.value)}
+                              >
                                 <option value="">(선택)</option>
                                 <option value="easy">쉬움</option>
                                 <option value="normal">보통</option>
                                 <option value="hard">어려움</option>
                               </select>
-                              {renderDifficultyBadge(difficultyMap[it.pair_id])}
+                              {renderDifficultyBadge(difficultyMap[String(it.pair_id)])}
                               <span style={{ fontSize: 13 }}>출처: {it.material_title ?? '-'}</span>
                               <button className="ui-btn sm" onClick={() => nav(`/category/recommend/${it.material_id}`)}>
                                 이동
@@ -631,7 +634,7 @@ export default function ClassifiedListPage() {
                                 교재 메모
                               </label>
                               <input
-                                value={usedInMap[it.pair_id] ?? ''}
+                                value={usedInMap[String(it.pair_id)] ?? ''}
                                 onChange={(e) => onUsedInChange(it.pair_id, e.target.value)}
                                 placeholder="예) 능률보카 3과 / 자작 프린트 5회차"
                                 style={{ width: '100%', padding: '8px 10px', border: '1px solid #e3e8f2', borderRadius: 8, fontSize: 13 }}
