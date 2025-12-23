@@ -51,8 +51,8 @@ async function fetchAllPaged(makeQuery, pageSize = 1000, maxPages = 200) {
 export default function ClassifiedListPage() {
   const nav = useNavigate();
 
-  const [tab, setTab] = useState('item');
-  const [status, setStatus] = useState('all');
+  const [tab, setTab] = useState('item');      // item | category
+  const [status, setStatus] = useState('all'); // all | done | notdone
   const [rows, setRows] = useState([]);
   const [catRows, setCatRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -88,31 +88,47 @@ export default function ClassifiedListPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, status]);
 
+  // ✅ (핵심) 자료별 보기: v_materials_with_counts 기반으로 "분류완료/미분류"를 DB에서 계산해서 가져오기
   async function fetchMaterials() {
     setLoading(true);
     try {
+      // v_materials_with_counts가 이미 있는 프로젝트 전제
+      // (없으면 error 나니까, 그때 알려주면 뷰 생성 SQL로 바로 잡아줄게)
       const data = await fetchAllPaged(
-        () =>
-          supabase
-            .from('materials')
-            .select('id, title, status, updated_at, grade, year, month, number')
-            .order('updated_at', { ascending: false }),
+        () => {
+          let q = supabase
+            .from('v_materials_with_counts')
+            .select(
+              'id, title, status, updated_at, grade, year, month, number,' +
+                'pair_cnt, categorized_pair_cnt, uncategorized_pair_cnt, is_fully_categorized'
+            )
+            .order('updated_at', { ascending: false });
+
+          if (status === 'done') q = q.eq('status', 'done');
+          if (status === 'notdone') q = q.neq('status', 'done');
+
+          return q;
+        },
         1000,
         50
       );
+
       setRows(data || []);
     } catch (e) {
       console.error('[fetchMaterials]', e);
-      alert(`자료 불러오기 오류: ${e.message}`);
+      alert(
+        `자료 불러오기 오류: ${e.message}\n\n` +
+          `※ v_materials_with_counts 뷰가 없거나 컬럼이 다르면 이 에러가 납니다.\n` +
+          `그 경우, 뷰 정의를 맞춰주면 바로 해결됩니다.`
+      );
     } finally {
       setLoading(false);
     }
   }
 
   /**
-   * ✅ 핵심 수정:
+   * ✅ 문장별 보기 로직(기존 유지)
    * - pair_id 비교/Set/Map 키를 전부 String(...) 로 통일
-   * - 그래서 bigint가 number/string 섞여와도 "미분류 오탐"이 사라짐
    */
   async function fetchByCategory() {
     setLoading(true);
@@ -138,27 +154,26 @@ export default function ClassifiedListPage() {
         () => {
           let q = supabase
             .from('material_pairs')
-            .select('id, en_sentence, ko_sentence, used_in, difficulty, material_id, materials!inner(title,status)')
+            .select(
+              'id, en_sentence, ko_sentence, used_in, difficulty, material_id, materials!inner(title,status)'
+            )
             .order('id', { ascending: true }); // paging 안정
           if (status === 'done') q = q.eq('materials.status', 'done');
+          if (status === 'notdone') q = q.neq('materials.status', 'done');
           return q;
         },
         1000,
         200
       );
 
-      // ✅ id 키는 문자열로 통일
       const pairIds = (pairs ?? []).map((p) => String(p.id)).filter(Boolean);
 
-      // pairMap도 문자열 키
       const pairMap = {};
       for (const p of pairs ?? []) {
         const pidKey = String(p.id);
         pairMap[pidKey] = {
-          // RPC 호출용으로는 원래 id 그대로도 남겨둠
           pair_id: p.id,
           pair_id_key: pidKey,
-
           material_id: p.material_id,
           material_title: p.materials?.title ?? null,
           material_status: p.materials?.status ?? null,
@@ -174,9 +189,6 @@ export default function ClassifiedListPage() {
       const CHUNK = 500;
       for (let i = 0; i < pairIds.length; i += CHUNK) {
         const slice = pairIds.slice(i, i + CHUNK);
-
-        // ⚠️ pair_id 타입이 bigint(number/string) 섞여도 in()에는 문자열로 넣어도 잘 매칭됨(대부분의 경우)
-        // 만약 프로젝트에서 강제로 실패하면 slice를 Number로 바꿔야 하는데, 그땐 bigint 안전성 이슈가 생김.
         const mapChunk = await fetchAllPaged(
           () =>
             supabase
@@ -187,11 +199,10 @@ export default function ClassifiedListPage() {
           2000,
           50
         );
-
         mappingsAll.push(...(mapChunk ?? []));
       }
 
-      const hasAnyCategory = new Set(); // ✅ 문자열 키만 넣기
+      const hasAnyCategory = new Set();
       const categorized = [];
 
       for (const m of mappingsAll) {
@@ -204,8 +215,7 @@ export default function ClassifiedListPage() {
         const base = pairMap[pidKey];
         if (!base) continue;
 
-        const path =
-          cid && metaById[cid] ? buildPathLabel(cid, metaById) : '(삭제된 분류)';
+        const path = cid && metaById[cid] ? buildPathLabel(cid, metaById) : '(삭제된 분류)';
 
         categorized.push({
           category_id: cid || 'MISSING_CAT',
@@ -215,7 +225,7 @@ export default function ClassifiedListPage() {
         });
       }
 
-      // 4) 미분류 = 매핑 0개 (문자열 키로 비교)
+      // 4) 미분류 = 매핑 0개
       const uncategorized = [];
       for (const p of pairs ?? []) {
         const pidKey = String(p.id);
@@ -239,7 +249,6 @@ export default function ClassifiedListPage() {
       const nextUsed = {};
       const nextDiff = {};
       for (const r of merged) {
-        // ✅ 여기서도 key로 통일하면 안전
         const k = String(r.pair_id);
         nextUsed[k] = r.used_in ?? '';
         nextDiff[k] = r.difficulty ?? '';
@@ -437,6 +446,21 @@ export default function ClassifiedListPage() {
     setGroupOpen((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }));
   }
 
+  const statusBadge = (m) => {
+    // ✅ DB 집계 기반
+    const pairCnt = Number(m.pair_cnt ?? 0);
+    const unc = Number(m.uncategorized_pair_cnt ?? 0);
+    const ok = !!m.is_fully_categorized;
+
+    if (!pairCnt) return <span className="ui-badge">문장 없음</span>;
+    if (ok) return <span className="ui-badge" style={{ background: '#10b981', color: '#fff' }}>분류완료</span>;
+    return (
+      <span className="ui-badge" style={{ background: '#ef4444', color: '#fff' }}>
+        미분류 {unc}문장
+      </span>
+    );
+  };
+
   return (
     <div className="ui-page">
       <div className="ui-wrap">
@@ -460,6 +484,20 @@ export default function ClassifiedListPage() {
             <button className={`ui-tab ${tab === 'category' ? 'active' : ''}`} onClick={() => setTab('category')}>
               문장별 보기
             </button>
+          </div>
+
+          <div className="ui-toolbar" style={{ marginTop: 10, justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span className="ui-sub">필터:</span>
+              <select value={status} onChange={(e) => setStatus(e.target.value)} className="ui-input" style={{ width: 160 }}>
+                <option value="all">전체</option>
+                <option value="done">done만</option>
+                <option value="notdone">done 제외</option>
+              </select>
+            </div>
+            <div className="ui-sub" style={{ fontSize: 12 }}>
+              ※ “미분류”는 DB 기준(문장별 분류 1개 이상 여부)으로 계산됩니다.
+            </div>
           </div>
         </div>
 
@@ -497,7 +535,11 @@ export default function ClassifiedListPage() {
                         <div key={m.id} className="ui-card" style={{ marginTop: 6, background: '#fff' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
                             <div onClick={() => nav(`/category/recommend/${m.id}`)} style={{ cursor: 'pointer' }}>
-                              <b>{m.title || '(제목 없음)'}</b>
+                              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <b>{m.title || '(제목 없음)'}</b>
+                                {statusBadge(m)}
+                                <span className="ui-badge">총 {Number(m.pair_cnt ?? 0)}문장</span>
+                              </div>
                               <div style={{ fontSize: 13, color: '#5d6b82' }}>
                                 상태: {m.status || '저장됨'} / {new Date(m.updated_at).toLocaleString('ko-KR')}
                               </div>
