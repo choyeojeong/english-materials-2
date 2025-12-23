@@ -371,19 +371,21 @@ export default function CategoryRecommendPage() {
       const pairIdList = (pairs ?? []).map((p) => String(p.id)).filter(Boolean);
 
       // selections 만들기: 반드시 pairIdList 기준
-      const selections = pairIdList.map((pid) => {
-        const set = selected[pid] ?? new Set();
-        const raw = Array.from(set || []);
+const selections = pairIdList
+  .map((pid) => {
+    const set = selected[pid] ?? new Set();
+    const raw = Array.from(set || []);
+    const category_ids = raw.filter((cid) => UUID_RE.test(String(cid)));
 
-        // uuid만 남기기 (혹시 이상값 섞였을 때 전체 저장이 꼬이는 거 방지)
-        const category_ids = raw.filter((cid) => UUID_RE.test(String(cid)));
+    // ✅ 선택이 0개면 저장 payload에서 제외
+    if (category_ids.length === 0) return null;
 
-        // RPC에는 int8로 안전하게
-        const n = Number(pid);
-        const pair_id = Number.isFinite(n) ? n : pid; // 매우 큰 bigint 대비(혹시라도)
+    const n = Number(pid);
+    const pair_id = Number.isFinite(n) ? n : pid;
 
-        return { pair_id, category_ids };
-      });
+    return { pair_id, category_ids };
+  })
+  .filter(Boolean);
 
       // (선택) 디버그: 저장 직전 요약
       const totalChosen = selections.reduce((acc, s) => acc + (s.category_ids?.length || 0), 0);
