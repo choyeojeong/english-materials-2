@@ -76,6 +76,7 @@ export default function ClassifiedListPage() {
   useEffect(() => {
     if (tab === 'item') fetchMaterials();
     else fetchByCategory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, status]);
 
   // ✅ 자료 불러오기 (메타까지)
@@ -94,81 +95,121 @@ export default function ClassifiedListPage() {
   async function fetchByCategory() {
     setLoading(true);
 
-    // 1) 카테고리 메타 전체 로드 (경로 라벨 구성용)
-    //    - 깊은 트리라도 parent_id 체인만 타면 됨
-    //    - 컬럼 최소화
-    const { data: catMeta, error: catErr } = await supabase
-      .from('category_nodes')
-      .select('id, name, parent_id')
-      .limit(50000);
-    if (catErr) {
-      console.warn('[category_nodes] load failed:', catErr.message);
+    try {
+      // 1) 카테고리 메타 전체 로드 (경로 라벨 구성용)
+      const { data: catMeta, error: catErr } = await supabase
+        .from('category_nodes')
+        .select('id, name, parent_id')
+        .limit(50000);
+
+      if (catErr) console.warn('[category_nodes] load failed:', catErr.message);
+
+      const metaById = {};
+      (catMeta ?? []).forEach((n) => {
+        metaById[n.id] = { id: n.id, name: n.name, parent_id: n.parent_id };
+      });
+
+      // 2) 분류된 문장(뷰)
+      const { data: viewData, error: vErr } = await supabase
+        .from('v_category_pair_sentences')
+        .select('*')
+        .limit(5000);
+
+      if (vErr) console.warn('[v_category_pair_sentences] load failed:', vErr.message);
+
+      const categorized0 = (viewData ?? []).filter((r) =>
+        status === 'done' ? r.material_status === 'done' : true
+      );
+
+      // ✅ category_path_label을 프론트에서 채워 넣는다
+      const categorized = categorized0.map((r) => {
+        const cid = r.category_id ?? null;
+        const path = cid ? buildPathLabel(cid, metaById) : '';
+        return {
+          ...r,
+          category_path_label: path || r.category_name || '(이름 없음)',
+        };
+      });
+
+      // ------------------------------------------------------------------
+      // ⭐ 핵심 수정: "미분류"를 left join null 로 잡지 말고,
+      // material_pair_categories에 존재하는 pair_id를 따로 가져와 JS로 제외한다.
+      // (이게 지금 '분류했는데도 미분류에 섞이는' 현상을 막는 가장 안전한 방법)
+      // ------------------------------------------------------------------
+
+      // 3) material_pairs (materials inner 포함) 먼저 가져오기
+      let mpReq = supabase
+        .from('material_pairs')
+        .select(
+          'id, en_sentence, ko_sentence, used_in, difficulty, material_id, ' +
+            'materials!inner(title,status)'
+        )
+        .limit(5000);
+
+      if (status === 'done') {
+        mpReq = mpReq.eq('materials.status', 'done');
+      }
+
+      const { data: mpData, error: mpErr } = await mpReq;
+      if (mpErr) throw mpErr;
+
+      const pairIds = (mpData ?? []).map((r) => r.id).filter((v) => v != null);
+
+      // 4) 분류가 있는 pair_id 목록 가져오기
+      //    - in()이 너무 크면 에러 날 수 있어서 청크 처리
+      const categorizedPairIdSet = new Set();
+
+      const CHUNK = 800; // 안전값
+      for (let i = 0; i < pairIds.length; i += CHUNK) {
+        const chunk = pairIds.slice(i, i + CHUNK);
+        const { data: pcRows, error: pcErr } = await supabase
+          .from('material_pair_categories')
+          .select('pair_id')
+          .in('pair_id', chunk)
+          .limit(100000);
+
+        if (pcErr) throw pcErr;
+        (pcRows ?? []).forEach((r) => {
+          if (r?.pair_id != null) categorizedPairIdSet.add(r.pair_id);
+        });
+      }
+
+      // 5) 미분류 = material_pair_categories에 하나도 없는 pair만
+      const uncategorized = (mpData ?? [])
+        .filter((u) => !categorizedPairIdSet.has(u.id))
+        .map((u) => ({
+          category_id: null,
+          category_name: '(미분류)',
+          category_path_label: '(미분류)',
+          pair_id: u.id,
+          material_id: u.material_id,
+          material_title: u.materials?.title ?? null,
+          material_status: u.materials?.status ?? null,
+          en_sentence: u.en_sentence,
+          ko_sentence: u.ko_sentence,
+          used_in: u.used_in ?? '',
+          difficulty: u.difficulty ?? '',
+        }));
+
+      // 6) 합치기
+      const merged = [...categorized, ...uncategorized];
+      setCatRows(merged);
+
+      // 7) used_in / difficulty 초기화
+      const nextUsed = {};
+      const nextDiff = {};
+      for (const r of merged) {
+        nextUsed[r.pair_id] = r.used_in ?? '';
+        nextDiff[r.pair_id] = r.difficulty ?? '';
+      }
+      setUsedInMap(nextUsed);
+      setDifficultyMap(nextDiff);
+    } catch (e) {
+      console.error('[fetchByCategory] error', e);
+      alert('불러오기 실패: ' + (e?.message || e));
+    } finally {
+      setLoading(false);
     }
-    const metaById = {};
-    (catMeta ?? []).forEach((n) => {
-      metaById[n.id] = { id: n.id, name: n.name, parent_id: n.parent_id };
-    });
-
-    // 2) 분류된 문장(뷰)
-    const { data: viewData } = await supabase
-      .from('v_category_pair_sentences')
-      .select('*')
-      .limit(5000);
-
-    const categorized0 = (viewData ?? []).filter((r) =>
-      status === 'done' ? r.material_status === 'done' : true
-    );
-
-    // ✅ 여기서 category_path_label을 프론트에서 채워 넣는다
-    const categorized = categorized0.map((r) => {
-      const cid = r.category_id ?? null;
-      const path = cid ? buildPathLabel(cid, metaById) : '';
-      return {
-        ...r,
-        category_path_label: path || r.category_name || '(이름 없음)',
-      };
-    });
-
-    // 3) 미분류 문장 (left join null)
-    let uncReq = supabase
-      .from('material_pairs')
-      .select(
-        'id, en_sentence, ko_sentence, used_in, difficulty, material_id, ' +
-          'materials!inner(title,status), material_pair_categories!left(pair_id)'
-      )
-      .is('material_pair_categories.pair_id', null)
-      .limit(5000);
-    if (status === 'done') {
-      uncReq = uncReq.eq('materials.status', 'done');
-    }
-    const { data: uncData } = await uncReq;
-
-    const uncategorized = (uncData ?? []).map((u) => ({
-      category_id: null,
-      category_name: '(미분류)',
-      category_path_label: '(미분류)',
-      pair_id: u.id,
-      material_id: u.material_id,
-      material_title: u.materials?.title ?? null,
-      material_status: u.materials?.status ?? null,
-      en_sentence: u.en_sentence,
-      ko_sentence: u.ko_sentence,
-      used_in: u.used_in ?? '',
-      difficulty: u.difficulty ?? '',
-    }));
-
-    const merged = [...categorized, ...uncategorized];
-    setCatRows(merged);
-
-    const nextUsed = {};
-    const nextDiff = {};
-    for (const r of merged) {
-      nextUsed[r.pair_id] = r.used_in ?? '';
-      nextDiff[r.pair_id] = r.difficulty ?? '';
-    }
-    setUsedInMap(nextUsed);
-    setDifficultyMap(nextDiff);
-    setLoading(false);
   }
 
   // ✅ 자료 삭제
@@ -250,7 +291,7 @@ export default function ClassifiedListPage() {
 
   // ✅ 문장 그룹화 (문장별 보기 탭)
   // ✅ 개선: 카테고리명뿐 아니라 en_sentence/ko_sentence에도 검색 적용
-  // ✅ 추가: category_name 대신 category_path_label로 그룹핑 (경로가 같아야 같은 그룹)
+  // ✅ 추가: category_name 대신 category_path_label로 그룹핑
   const groupedCats = useMemo(() => {
     const qn = q.trim().toLowerCase();
     const map = new Map();
@@ -259,12 +300,10 @@ export default function ClassifiedListPage() {
       const cid = r.category_id ?? 'UNCAT';
       const cname = r.category_path_label ?? r.category_name ?? '(미분류)';
 
-      // 🔥 검색 로직 개선 (기존 기능은 그대로, 필터만 확장)
       if (qn) {
         const cnameL = (cname || '').toLowerCase();
         const enL = (r.en_sentence || '').toLowerCase();
         const koL = (r.ko_sentence || '').toLowerCase();
-
         if (!cnameL.includes(qn) && !enL.includes(qn) && !koL.includes(qn)) continue;
       }
 
@@ -280,7 +319,6 @@ export default function ClassifiedListPage() {
     const qn = itemQ.trim().toLowerCase();
     const tokens = qn ? qn.split(/\s+/) : [];
 
-    // 1) 먼저 자료 단위 필터링
     const filteredRows = rows.filter((m) => {
       if (!tokens.length) return true;
 
@@ -295,7 +333,6 @@ export default function ClassifiedListPage() {
       return tokens.every((tok) => joined.includes(tok));
     });
 
-    // 2) 그룹핑
     const map = new Map();
     for (const m of filteredRows) {
       const g = m.grade || '기타';
@@ -303,19 +340,12 @@ export default function ClassifiedListPage() {
       const mm = m.month || '';
       const key = `${g}|${y}|${mm}`;
       if (!map.has(key)) {
-        map.set(key, {
-          key,
-          grade: g,
-          year: y,
-          month: mm,
-          items: [],
-        });
+        map.set(key, { key, grade: g, year: y, month: mm, items: [] });
       }
       map.get(key).items.push(m);
     }
 
     const arr = Array.from(map.values());
-    // 그룹 정렬: 연도 ↓, 월 ↓, 학년 순
     arr.sort((a, b) => {
       const ay = Number(a.year) || 0;
       const by = Number(b.year) || 0;
@@ -328,7 +358,6 @@ export default function ClassifiedListPage() {
       return ag - bg;
     });
 
-    // 그룹 안 정렬: 문항번호 ↑, 그다음 최근 수정 ↓
     for (const g of arr) {
       g.items.sort((a, b) => {
         const an = a.number ?? 9999;
@@ -432,7 +461,6 @@ export default function ClassifiedListPage() {
         {/* ✅ 자료별 보기 */}
         {tab === 'item' && (
           <div className="ui-card" style={{ marginTop: 12 }}>
-            {/* 상단 검색창 (학년/연도/월/제목/번호 통합검색) */}
             <div style={{ marginBottom: 10 }}>
               <input
                 value={itemQ}
@@ -478,11 +506,7 @@ export default function ClassifiedListPage() {
 
                     {open &&
                       grp.items.map((m) => (
-                        <div
-                          key={m.id}
-                          className="ui-card"
-                          style={{ marginTop: 6, background: '#fff' }}
-                        >
+                        <div key={m.id} className="ui-card" style={{ marginTop: 6, background: '#fff' }}>
                           <div
                             style={{
                               display: 'flex',
@@ -497,18 +521,14 @@ export default function ClassifiedListPage() {
                             >
                               <b>{m.title || '(제목 없음)'}</b>
                               <div style={{ fontSize: 13, color: '#5d6b82' }}>
-                                상태: {m.status || '저장됨'} /{' '}
-                                {new Date(m.updated_at).toLocaleString('ko-KR')}
+                                상태: {m.status || '저장됨'} / {new Date(m.updated_at).toLocaleString('ko-KR')}
                               </div>
                             </div>
                             <div style={{ display: 'flex', gap: 6 }}>
                               <button className="ui-btn sm" onClick={() => startEditMaterial(m)}>
                                 메타 수정
                               </button>
-                              <button
-                                className="ui-btn danger sm"
-                                onClick={() => deleteMaterial(m.id)}
-                              >
+                              <button className="ui-btn danger sm" onClick={() => deleteMaterial(m.id)}>
                                 삭제
                               </button>
                             </div>
@@ -598,10 +618,7 @@ export default function ClassifiedListPage() {
                                 <button className="ui-btn primary sm" onClick={saveMaterialMeta}>
                                   저장
                                 </button>
-                                <button
-                                  className="ui-btn sm"
-                                  onClick={() => setEditingMaterialId(null)}
-                                >
+                                <button className="ui-btn sm" onClick={() => setEditingMaterialId(null)}>
                                   취소
                                 </button>
                               </div>
@@ -650,7 +667,6 @@ export default function ClassifiedListPage() {
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        {/* ✅ 이제 전체 경로 라벨 표시 */}
                         <b>{cat.category_name}</b>
                         <span className="ui-badge">{cat.items.length}문장</span>
                       </div>
@@ -672,7 +688,9 @@ export default function ClassifiedListPage() {
                               <div style={{ fontWeight: 700, flex: 1 }}>{it.en_sentence}</div>
                               <button
                                 className="ui-btn sm"
-                                onClick={() => copyText(it.en_sentence, `en-${it.category_id}-${it.pair_id}`)}
+                                onClick={() =>
+                                  copyText(it.en_sentence, `en-${it.category_id}-${it.pair_id}`)
+                                }
                                 title="영어 문장 복사"
                               >
                                 복사
@@ -694,7 +712,9 @@ export default function ClassifiedListPage() {
                               <div style={{ color: '#4b5563', flex: 1 }}>{it.ko_sentence}</div>
                               <button
                                 className="ui-btn sm"
-                                onClick={() => copyText(it.ko_sentence, `ko-${it.category_id}-${it.pair_id}`)}
+                                onClick={() =>
+                                  copyText(it.ko_sentence, `ko-${it.category_id}-${it.pair_id}`)
+                                }
                                 title="한국어 문장 복사"
                               >
                                 복사
@@ -717,16 +737,10 @@ export default function ClassifiedListPage() {
                               </select>
                               {renderDifficultyBadge(difficultyMap[it.pair_id])}
                               <span style={{ fontSize: 13 }}>출처: {it.material_title ?? '-'}</span>
-                              <button
-                                className="ui-btn sm"
-                                onClick={() => nav(`/category/recommend/${it.material_id}`)}
-                              >
+                              <button className="ui-btn sm" onClick={() => nav(`/category/recommend/${it.material_id}`)}>
                                 이동
                               </button>
-                              <button
-                                className="ui-btn danger sm"
-                                onClick={() => deleteSentence(it.pair_id)}
-                              >
+                              <button className="ui-btn danger sm" onClick={() => deleteSentence(it.pair_id)}>
                                 삭제
                               </button>
                             </div>
