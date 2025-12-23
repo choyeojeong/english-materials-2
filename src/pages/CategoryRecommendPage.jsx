@@ -35,11 +35,11 @@ function pathStringForDB(categoryId, metaObj) {
 }
 
 // 동일 출처(relative 경로) Vercel 함수 호출
-async function callRecommendAPI(pairs, leafPaths, {
-  topN = 6,
-  minScore = 0.5,
-  quality = 'high', // 🔸 기본 high(앙상블+검증)
-} = {}) {
+async function callRecommendAPI(
+  pairs,
+  leafPaths,
+  { topN = 6, minScore = 0.5, quality = 'high' } = {}
+) {
   const res = await fetch('/api/recommend_ai', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -182,16 +182,20 @@ export default function CategoryRecommendPage() {
           if (e3) throw e3;
           selRows = data ?? [];
         }
+
+        // ✅ 중요: pairId는 문자열 키로 통일해서 map 구성
         const selMap = {};
-        for (const id of pairIds) selMap[id] = new Set();
+        for (const id of pairIds) selMap[String(id)] = new Set();
         for (const s of selRows) {
-          if (!s?.pair_id || !s?.category_id) continue;
-          (selMap[s.pair_id] ||= new Set()).add(s.category_id);
+          const pid = s?.pair_id;
+          const cid = s?.category_id;
+          if (!pid || !cid) continue;
+          (selMap[String(pid)] ||= new Set()).add(cid);
         }
 
         // 5) 난이도 초기화
         const nextDiff = {};
-        for (const p of pairRows ?? []) nextDiff[p.id] = p.difficulty ?? '';
+        for (const p of pairRows ?? []) nextDiff[String(p.id)] = p.difficulty ?? '';
 
         // 6) 🔁 로컬 자동 저장돼 있던 거 있으면 합치기
         let restoredSelected = selMap;
@@ -200,9 +204,9 @@ export default function CategoryRecommendPage() {
           if (saved) {
             const parsed = JSON.parse(saved);
             if (parsed && parsed.selected) {
-              // parsed.selected: { pairId: [catId, catId...] }
               const merged = {};
-              for (const pid of pairIds) {
+              for (const pidRaw of pairIds) {
+                const pid = String(pidRaw);
                 const dbSet = selMap[pid] ? new Set(selMap[pid]) : new Set();
                 const localArr = parsed.selected[pid];
                 if (Array.isArray(localArr)) {
@@ -310,25 +314,27 @@ export default function CategoryRecommendPage() {
   const pathLabel = (categoryId, fallback) => pathLabelLocal(categoryId, fallback, catMeta);
 
   const isOn = (pairId, categoryId) => {
-    const set = selected[pairId];
+    const set = selected[String(pairId)];
     return set ? set.has(categoryId) : false;
   };
 
   const toggle = (pairId, categoryId) => {
     if (!pairId || !categoryId) return;
+    const pid = String(pairId);
     setSelected((prev) => {
       const next = { ...prev };
-      const set = new Set(next[pairId] ?? []);
+      const set = new Set(next[pid] ?? []);
       set.has(categoryId) ? set.delete(categoryId) : set.add(categoryId);
-      next[pairId] = set;
+      next[pid] = set;
       return next;
     });
   };
 
   const searchCats = async (pairId, text) => {
-    setQuery((q) => ({ ...q, [pairId]: text }));
+    const pid = String(pairId);
+    setQuery((q) => ({ ...q, [pid]: text }));
     if (!text?.trim()) {
-      setResults((r) => ({ ...r, [pairId]: [] }));
+      setResults((r) => ({ ...r, [pid]: [] }));
       return;
     }
     const { data, error } = await supabase
@@ -340,7 +346,7 @@ export default function CategoryRecommendPage() {
     const patch = {};
     for (const n of data ?? []) patch[n.id] = { name: n.name, parent_id: n.parent_id };
     setCatMeta((p) => ({ ...p, ...patch }));
-    setResults((r) => ({ ...r, [pairId]: data ?? [] }));
+    setResults((r) => ({ ...r, [pid]: data ?? [] }));
   };
 
   // 🔁 검색 결과 버튼도 토글 동작
@@ -353,13 +359,38 @@ export default function CategoryRecommendPage() {
     toggle(pairId, cat.id);
   };
 
+  // ✅ 저장 (핵심 수정: pairs 기준으로 payload 생성 + 저장 후 검증)
   const saveAll = async () => {
     try {
+      if (!materialId || !UUID_RE.test(materialId)) {
+        alert('materialId가 올바르지 않습니다.');
+        return;
+      }
+
+      // 0) 현재 material의 pairIds(문장 목록) 기준으로만 저장한다
+      const pairIdList = (pairs ?? []).map((p) => String(p.id)).filter(Boolean);
+
+      // selections 만들기: 반드시 pairIdList 기준
+      const selections = pairIdList.map((pid) => {
+        const set = selected[pid] ?? new Set();
+        const raw = Array.from(set || []);
+
+        // uuid만 남기기 (혹시 이상값 섞였을 때 전체 저장이 꼬이는 거 방지)
+        const category_ids = raw.filter((cid) => UUID_RE.test(String(cid)));
+
+        // RPC에는 int8로 안전하게
+        const n = Number(pid);
+        const pair_id = Number.isFinite(n) ? n : pid; // 매우 큰 bigint 대비(혹시라도)
+
+        return { pair_id, category_ids };
+      });
+
+      // (선택) 디버그: 저장 직전 요약
+      const totalChosen = selections.reduce((acc, s) => acc + (s.category_ids?.length || 0), 0);
+      console.log('[saveAll] selections', selections);
+      console.log('[saveAll] pairs=', pairIdList.length, 'chosen(total)=', totalChosen);
+
       // 1) 분류 저장
-      const selections = Object.entries(selected).map(([pairId, set]) => ({
-        pair_id: Number(pairId),
-        category_ids: Array.from(set || []),
-      }));
       const { error: e1 } = await supabase.rpc('material_save_pair_categories', {
         p_material_id: materialId,
         p_selections: selections,
@@ -369,7 +400,8 @@ export default function CategoryRecommendPage() {
       // 2) 학습 데이터 누적
       await Promise.all(
         (pairs ?? []).map(async (p) => {
-          const chosenIds = Array.from(selected[p.id] ?? []).filter((cid) => leafIds.has(cid));
+          const pid = String(p.id);
+          const chosenIds = Array.from(selected[pid] ?? []).filter((cid) => leafIds.has(cid));
           if (chosenIds.length === 0) return;
           const paths = chosenIds.map((cid) => pathStringForDB(cid, catMeta)).filter(Boolean);
           if (paths.length === 0) return;
@@ -385,10 +417,48 @@ export default function CategoryRecommendPage() {
         })
       );
 
-      // 저장 성공했으면 로컬 것도 비워줄 수 있음
-      localStorage.removeItem(STORAGE_KEY);
+      // 3) ✅ 저장 후 검증: “진짜로 미분류가 남았는지” 체크
+      const { data: uncRows, error: eCheck } = await supabase
+        .from('material_pairs')
+        .select('id')
+        .eq('material_id', materialId)
+        .not('id', 'is', null);
 
-      alert('저장되었습니다.');
+      if (!eCheck) {
+        const ids = (uncRows ?? []).map((r) => r.id);
+        if (ids.length) {
+          const { data: pcRows, error: ePC } = await supabase
+            .from('material_pair_categories')
+            .select('pair_id')
+            .in('pair_id', ids);
+
+          if (!ePC) {
+            const has = new Set((pcRows ?? []).map((r) => String(r.pair_id)));
+            const stillUncat = ids.map(String).filter((pid) => !has.has(pid));
+
+            // 아직도 미분류가 남아있으면 즉시 알려줌(원인추적 쉬워짐)
+            if (stillUncat.length > 0) {
+              console.warn('[saveAll] still uncategorized pair_ids:', stillUncat.slice(0, 30));
+              alert(
+                `저장은 완료됐지만, 아직 분류가 없는 문장이 ${stillUncat.length}개 남아있어요.\n` +
+                  `콘솔에 pair_id 목록을 찍어뒀습니다.\n` +
+                  `(대부분은 "선택이 0개"인 문장일 수 있어요)`
+              );
+            } else {
+              alert('저장되었습니다.');
+            }
+          } else {
+            alert('저장되었습니다. (검증 조회 실패)');
+          }
+        } else {
+          alert('저장되었습니다.');
+        }
+      } else {
+        alert('저장되었습니다. (검증 조회 실패)');
+      }
+
+      // 저장 성공했으면 로컬도 제거
+      localStorage.removeItem(STORAGE_KEY);
     } catch (err) {
       alert(`저장 오류: ${err.message}`);
     }
@@ -396,10 +466,11 @@ export default function CategoryRecommendPage() {
 
   // 🔹 난이도 변경 시 자동 저장 (0.5s 디바운스)
   function onChangeDifficulty(pairId, value) {
-    setDifficultyMap((prev) => ({ ...prev, [pairId]: value ?? '' }));
+    const pid = String(pairId);
+    setDifficultyMap((prev) => ({ ...prev, [pid]: value ?? '' }));
     const timers = diffTimersRef.current;
-    if (timers[pairId]) clearTimeout(timers[pairId]);
-    timers[pairId] = setTimeout(async () => {
+    if (timers[pid]) clearTimeout(timers[pid]);
+    timers[pid] = setTimeout(async () => {
       try {
         const { error } = await supabase.rpc('material_update_pair_difficulty', {
           p_pair_id: pairId,
@@ -409,7 +480,7 @@ export default function CategoryRecommendPage() {
       } catch (e) {
         console.error('[difficulty save]', e?.message || e);
       } finally {
-        delete timers[pairId];
+        delete timers[pid];
       }
     }, 500);
   }
@@ -419,7 +490,6 @@ export default function CategoryRecommendPage() {
 
   // 🔁 🔁 🔁 선택 상태 로컬 자동 저장
   useEffect(() => {
-    // selected가 Set이라 바로 저장하면 안 돼서 배열로 변환
     setAutosaveStatus('saving');
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
 
@@ -427,12 +497,9 @@ export default function CategoryRecommendPage() {
       try {
         const plainSelected = {};
         for (const [pid, set] of Object.entries(selected)) {
-          plainSelected[pid] = Array.from(set || []);
+          plainSelected[String(pid)] = Array.from(set || []);
         }
-        const payload = {
-          selected: plainSelected,
-          ts: Date.now(),
-        };
+        const payload = { selected: plainSelected, ts: Date.now() };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
         setAutosaveStatus('saved');
       } catch (e) {
@@ -483,7 +550,8 @@ export default function CategoryRecommendPage() {
         {loading && <div className="ui-card">불러오는 중…</div>}
 
         {!loading && pairs.map((p) => {
-          const checked = selected[p.id] ?? new Set();
+          const pid = String(p.id);
+          const checked = selected[pid] ?? new Set();
           const baseRec = (recs[p.id] ?? []).filter(
             (v, i, a) => a.findIndex((x) => x.category_id === v.category_id) === i
           );
@@ -521,7 +589,7 @@ export default function CategoryRecommendPage() {
                               type="button"
                               className={`ui-btn sm ${on ? 'primary' : ''}`}
                               title={r.reason || ''}
-                              onClick={() => toggle(p.id, cid)}
+                              onClick={() => toggle(pid, cid)}
                             >
                               {pathLabel(cid)}
                               <span className="ui-sub" style={{ marginLeft: 6 }}>{scoreTxt}</span>
@@ -575,8 +643,8 @@ export default function CategoryRecommendPage() {
                     <select
                       className="ui-input"
                       style={{ width: '100%', marginTop: 4 }}
-                      value={difficultyMap[p.id] ?? ''}
-                      onChange={(e) => onChangeDifficulty(p.id, e.target.value)}
+                      value={difficultyMap[pid] ?? ''}
+                      onChange={(e) => onChangeDifficulty(pid, e.target.value)}
                     >
                       <option value="">{difficultyLabel('')}</option>
                       <option value="easy">쉬움</option>
@@ -591,18 +659,18 @@ export default function CategoryRecommendPage() {
                     <input
                       className="ui-input"
                       placeholder="예: 품사, 보통명사"
-                      value={query[p.id] ?? ''}
-                      onChange={(e) => searchCats(p.id, e.target.value)}
+                      value={query[pid] ?? ''}
+                      onChange={(e) => searchCats(pid, e.target.value)}
                     />
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
-                      {(results[p.id] ?? []).map((cat) => {
-                        const on = isOn(p.id, cat.id);
+                      {(results[pid] ?? []).map((cat) => {
+                        const on = isOn(pid, cat.id);
                         return (
                           <button
                             type="button"
                             key={cat.id}
                             className={`ui-btn sm ${on ? 'primary' : ''}`}
-                            onClick={() => addFromSearch(p.id, cat)}
+                            onClick={() => addFromSearch(pid, cat)}
                           >
                             {pathLabel(cat.id, cat.name)}
                           </button>
@@ -623,7 +691,7 @@ export default function CategoryRecommendPage() {
                           className="ui-badge"
                           title="클릭하면 해제됩니다"
                           style={{ cursor: 'pointer' }}
-                          onClick={() => toggle(p.id, cid)}
+                          onClick={() => toggle(pid, cid)}
                         >
                           {pathLabel(cid)}
                         </button>
